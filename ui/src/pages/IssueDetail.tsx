@@ -78,6 +78,10 @@ import {
   ChevronRight,
   Copy,
   EyeOff,
+  FileCode,
+  FileJson,
+  FileText,
+  FileType,
   Hexagon,
   ListTree,
   MessageSquare,
@@ -1498,6 +1502,14 @@ export function IssueDetail() {
   }, [detailTab, pendingCommentComposerFocusKey]);
 
   const isImageAttachment = (attachment: IssueAttachment) => attachment.contentType.startsWith("image/");
+  const isPdfAttachment = (attachment: IssueAttachment) => attachment.contentType === "application/pdf";
+  const getFileTypeIcon = (contentType: string) => {
+    if (contentType === "application/pdf") return FileType;
+    if (contentType === "application/json") return FileJson;
+    if (contentType.startsWith("text/markdown") || contentType.startsWith("text/plain")) return FileText;
+    if (contentType.startsWith("text/")) return FileCode;
+    return FileText;
+  };
   const attachmentList = attachments ?? [];
   const imageAttachments = attachmentList.filter(isImageAttachment);
   const nonImageAttachments = attachmentList.filter((a) => !isImageAttachment(a));
@@ -2044,33 +2056,48 @@ export function IssueDetail() {
 
         {nonImageAttachments.length > 0 && (
           <div className="space-y-2">
-            {nonImageAttachments.map((attachment) => (
-              <div key={attachment.id} className="border border-border rounded-md p-2">
-                <div className="flex items-center justify-between gap-2">
-                  <a
-                    href={attachment.contentPath}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs hover:underline truncate"
-                    title={attachment.originalFilename ?? attachment.id}
-                  >
-                    {attachment.originalFilename ?? attachment.id}
-                  </a>
-                  <button
-                    type="button"
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() => deleteAttachment.mutate(attachment.id)}
-                    disabled={deleteAttachment.isPending}
-                    title="Delete attachment"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+            {nonImageAttachments.map((attachment) => {
+              const Icon = getFileTypeIcon(attachment.contentType);
+              const isPdf = isPdfAttachment(attachment);
+              return (
+                <div key={attachment.id} className="border border-border rounded-md overflow-hidden">
+                  <div className="flex items-center justify-between gap-2 p-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <a
+                        href={attachment.contentPath}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs hover:underline truncate"
+                        title={attachment.originalFilename ?? attachment.id}
+                      >
+                        {attachment.originalFilename ?? attachment.id}
+                      </a>
+                    </div>
+                    <button
+                      type="button"
+                      className="text-muted-foreground hover:text-destructive shrink-0"
+                      onClick={() => deleteAttachment.mutate(attachment.id)}
+                      disabled={deleteAttachment.isPending}
+                      title="Delete attachment"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <p className="px-2 pb-1 text-[11px] text-muted-foreground">
+                    {attachment.contentType} · {(attachment.byteSize / 1024).toFixed(1)} KB
+                  </p>
+                  {isPdf && (
+                    <iframe
+                      src={attachment.contentPath}
+                      title={attachment.originalFilename ?? "PDF preview"}
+                      className="w-full h-[400px] border-t border-border bg-white"
+                      sandbox="allow-same-origin"
+                    />
+                  )}
                 </div>
-                <p className="text-[11px] text-muted-foreground">
-                  {attachment.contentType} · {(attachment.byteSize / 1024).toFixed(1)} KB
-                </p>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
         </div>

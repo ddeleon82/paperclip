@@ -24,6 +24,7 @@ export const updateCompanySchema = createCompanySchema
     feedbackDataSharingConsentByUserId: z.string().min(1).nullable().optional(),
     feedbackDataSharingTermsVersion: feedbackDataSharingTermsVersionSchema,
     brandColor: brandColorSchema,
+    defaultAssigneeAgentId: z.string().uuid().nullable().optional(),
     logoAssetId: logoAssetIdSchema,
   });
 

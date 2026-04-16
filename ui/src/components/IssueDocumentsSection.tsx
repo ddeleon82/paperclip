@@ -29,8 +29,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Check, ChevronDown, ChevronRight, Copy, Diff, Download, FilePenLine, FileText, MoreHorizontal, Plus, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy, Diff, Download, Eye, FilePenLine, FileText, MoreHorizontal, Plus, Trash2, X } from "lucide-react";
 import { DocumentDiffModal } from "./DocumentDiffModal";
+import { DocumentPreviewModal } from "./DocumentPreviewModal";
 
 type DraftState = {
   key: string;
@@ -164,6 +165,7 @@ export function IssueDocumentsSection({
   const [revisionMenuOpenKey, setRevisionMenuOpenKey] = useState<string | null>(null);
   const [selectedRevisionIds, setSelectedRevisionIds] = useState<Record<string, string | null>>({});
   const [diffViewKey, setDiffViewKey] = useState<string | null>(null);
+  const [previewDocumentKey, setPreviewDocumentKey] = useState<string | null>(null);
   const autosaveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copiedDocumentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasScrolledToHashRef = useRef(false);
@@ -924,6 +926,10 @@ export function IssueDocumentsSection({
                           Edit document
                         </DropdownMenuItem>
                       ) : null}
+                      <DropdownMenuItem onClick={() => setPreviewDocumentKey(doc.key)}>
+                        <Eye className="h-3.5 w-3.5" />
+                        Preview document
+                      </DropdownMenuItem>
                       {!isHistoricalPreview ? <DropdownMenuSeparator /> : null}
                       <DropdownMenuItem
                         onClick={() => downloadDocumentFile(doc.key, displayedBody)}
@@ -1193,6 +1199,18 @@ export function IssueDocumentsSection({
             latestRevisionNumber={diffDoc.latestRevisionNumber}
             open
             onOpenChange={(open) => { if (!open) setDiffViewKey(null); }}
+          />
+        );
+      })()}
+
+      {previewDocumentKey && (() => {
+        const previewDoc = sortedDocuments.find((d) => d.key === previewDocumentKey);
+        if (!previewDoc) return null;
+        return (
+          <DocumentPreviewModal
+            document={previewDoc}
+            open
+            onOpenChange={(open) => { if (!open) setPreviewDocumentKey(null); }}
           />
         );
       })()}

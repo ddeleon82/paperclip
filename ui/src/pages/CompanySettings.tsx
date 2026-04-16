@@ -1,11 +1,12 @@
 import { ChangeEvent, useEffect, useState } from "react";
 import { Link } from "@/lib/router";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DEFAULT_FEEDBACK_DATA_SHARING_TERMS_VERSION } from "@paperclipai/shared";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToast } from "../context/ToastContext";
 import { companiesApi } from "../api/companies";
+import { agentsApi } from "../api/agents";
 import { accessApi } from "../api/access";
 import { assetsApi } from "../api/assets";
 import { queryKeys } from "../lib/queryKeys";
@@ -200,6 +201,28 @@ export function CompanySettings() {
     setSnippetCopied(false);
     setSnippetCopyDelightId(0);
   }, [selectedCompanyId]);
+
+  const { data: companyAgents } = useQuery({
+    queryKey: queryKeys.agents.list(selectedCompanyId!),
+    queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+
+  const defaultAssigneeMutation = useMutation({
+    mutationFn: (agentId: string | null) =>
+      companiesApi.update(selectedCompanyId!, { defaultAssigneeAgentId: agentId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+      pushToast({ title: "Default assignee updated", tone: "success" });
+    },
+    onError: (err) => {
+      pushToast({
+        title: "Failed to update default assignee",
+        body: err instanceof Error ? err.message : "Unknown error",
+        tone: "error",
+      });
+    },
+  });
 
   const archiveMutation = useMutation({
     mutationFn: ({
@@ -414,6 +437,43 @@ export function CompanySettings() {
             onChange={(v) => settingsMutation.mutate(v)}
             toggleTestId="company-settings-team-approval-toggle"
           />
+        </div>
+      </div>
+
+      {/* Default Assignee */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Task Defaults
+        </div>
+        <div className="rounded-md border border-border px-4 py-4">
+          <Field
+            label="Default assignee"
+            hint="Agent automatically assigned to new tasks when no assignee is specified. Ensures tasks always enter the delegation flow."
+          >
+            <div className="flex items-center gap-2">
+              <select
+                className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                value={selectedCompany.defaultAssigneeAgentId ?? ""}
+                onChange={(e) => {
+                  const value = e.target.value || null;
+                  defaultAssigneeMutation.mutate(value);
+                }}
+                disabled={defaultAssigneeMutation.isPending}
+              >
+                <option value="">None (tasks can be unassigned)</option>
+                {(companyAgents ?? [])
+                  .filter((a) => a.status === "active")
+                  .map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name} ({agent.role ?? "agent"})
+                    </option>
+                  ))}
+              </select>
+              {defaultAssigneeMutation.isPending && (
+                <span className="text-xs text-muted-foreground shrink-0">Saving...</span>
+              )}
+            </div>
+          </Field>
         </div>
       </div>
 

@@ -605,7 +605,11 @@ export function NewIssueDialog() {
       setPriority(newIssueDefaults.priority ?? "");
       setProjectId(defaultProjectId);
       setProjectWorkspaceId(defaultProjectWorkspaceIdForProject(defaultProject));
-      setAssigneeValue(assigneeValueFromSelection(newIssueDefaults));
+      const explicitAssignee = assigneeValueFromSelection(newIssueDefaults);
+      const companyDefaultAssignee = dialogCompany?.defaultAssigneeAgentId
+        ? `agent:${dialogCompany.defaultAssigneeAgentId}`
+        : "";
+      setAssigneeValue(explicitAssignee || companyDefaultAssignee);
       setReviewerValue("");
       setApproverValue("");
       setShowReviewerRow(false);

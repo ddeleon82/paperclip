@@ -32,6 +32,7 @@ import { validate } from "../middleware/validate.js";
 import {
   accessService,
   agentService,
+  companyService,
   executionWorkspaceService,
   feedbackService,
   goalService,
@@ -290,6 +291,7 @@ export function issueRoutes(
   const workProductsSvc = workProductService(db);
   const documentsSvc = documentService(db);
   const routinesSvc = routineService(db);
+  const companiesSvc = companyService(db);
   const feedbackExportService = opts?.feedbackExportService;
   const upload = multer({
     storage: multer.memoryStorage(),
@@ -1262,6 +1264,14 @@ export function issueRoutes(
     assertCompanyAccess(req, companyId);
     if (req.body.assigneeAgentId || req.body.assigneeUserId) {
       await assertCanAssignTasks(req, companyId);
+    }
+
+    // Apply company default assignee when no assignee is specified
+    if (!req.body.assigneeAgentId && !req.body.assigneeUserId) {
+      const company = await companiesSvc.getById(companyId);
+      if (company?.defaultAssigneeAgentId) {
+        req.body.assigneeAgentId = company.defaultAssigneeAgentId;
+      }
     }
 
     const actor = getActorInfo(req);
