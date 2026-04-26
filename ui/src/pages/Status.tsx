@@ -79,7 +79,7 @@ const routineStateBadge: Record<RoutineState, string> = {
   failed: statusBadge.failed ?? statusBadgeDefault,
   idle: statusBadgeDefault,
   paused: statusBadge.paused ?? statusBadgeDefault,
-  overdue: "bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-400",
+  overdue: "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400",
 };
 
 const routineStateDot: Record<RoutineState, string> = {
@@ -87,7 +87,7 @@ const routineStateDot: Record<RoutineState, string> = {
   awaiting_review: "bg-violet-400",
   failed: "bg-red-400",
   overdue: "bg-amber-400",
-  paused: "bg-orange-400",
+  paused: "bg-yellow-400",
   idle: "bg-neutral-400",
 };
 
@@ -163,11 +163,11 @@ function humanCron(routine: RoutineListItem): string {
   return trigger.label ?? "Scheduled";
 }
 
-function isRunInWindow(run: RoutineRunSummary, window: TimeWindow): boolean {
+function isRunInWindow(run: RoutineRunSummary, tw: TimeWindow): boolean {
   if (!run.triggeredAt) return false;
   const triggeredAt = new Date(run.triggeredAt).getTime();
   const now = Date.now();
-  switch (window) {
+  switch (tw) {
     case "today":
       return now - triggeredAt < 86_400_000;
     case "7d":
@@ -278,11 +278,14 @@ function RoutineRow({
 
   return (
     <div
+      role="button"
+      tabIndex={0}
       className={cn(
-        "group flex items-center gap-3 h-11 px-3 cursor-pointer transition-colors hover:bg-accent/50",
+        "group flex items-center gap-3 h-11 px-3 cursor-pointer transition-colors duration-100 hover:bg-accent/50",
         isFailed && "bg-red-50/50 dark:bg-red-950/20",
       )}
       onClick={onClick}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }}
     >
       <span className={cn("h-2 w-2 rounded-full shrink-0", routineStateDot[state])} />
 
@@ -296,24 +299,23 @@ function RoutineRow({
 
       <RoutineStatusPill state={state} />
 
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="text-xs text-muted-foreground font-mono shrink-0 min-w-[48px] text-right">
-              {state === "overdue" && lastRunAt
-                ? `overdue by ${relativeTime(lastRunAt).replace(" ago", "")}`
-                : relativeTime(lastRunAt)}
-            </span>
-          </TooltipTrigger>
-          {lastRunAt && (
-            <TooltipContent>{absoluteTime(lastRunAt)}</TooltipContent>
-          )}
-        </Tooltip>
-      </TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="text-xs text-muted-foreground font-mono shrink-0 min-w-[48px] text-right">
+            {state === "overdue" && lastRunAt
+              ? `overdue by ${relativeTime(lastRunAt).replace(" ago", "")}`
+              : relativeTime(lastRunAt)}
+          </span>
+        </TooltipTrigger>
+        {lastRunAt && (
+          <TooltipContent>{absoluteTime(lastRunAt)}</TooltipContent>
+        )}
+      </Tooltip>
 
       <Button
         variant="ghost"
         size="icon-sm"
+        aria-label="View routine details"
         className="opacity-0 group-hover:opacity-100 shrink-0 hidden sm:flex"
         onClick={(e) => {
           e.stopPropagation();
@@ -343,7 +345,7 @@ function AgentGroupHeader({
 }) {
   return (
     <CollapsibleTrigger
-      className="flex w-full items-center gap-2 py-2 px-3 hover:bg-accent/30 transition-colors"
+      className="flex w-full items-center gap-2 py-2 px-3 hover:bg-accent/30 transition-colors duration-100"
       onClick={onToggle}
     >
       <ChevronRight
@@ -436,22 +438,20 @@ function RunSparkline({ runs }: { runs: RoutineRunSummary[] }) {
   };
 
   return (
-    <TooltipProvider>
-      <div className="flex items-center gap-1">
-        {squares.map((run, i) => (
-          <Tooltip key={i}>
-            <TooltipTrigger asChild>
-              <span className={cn("h-3 w-3 rounded-sm shrink-0", statusColor(run))} />
-            </TooltipTrigger>
-            {run && (
-              <TooltipContent>
-                {new Date(run.triggeredAt).toLocaleDateString()} — {run.status}
-              </TooltipContent>
-            )}
-          </Tooltip>
-        ))}
-      </div>
-    </TooltipProvider>
+    <div className="flex items-center gap-1">
+      {squares.map((run, i) => (
+        <Tooltip key={i}>
+          <TooltipTrigger asChild>
+            <span className={cn("h-3 w-3 rounded-sm shrink-0", statusColor(run))} />
+          </TooltipTrigger>
+          {run && (
+            <TooltipContent>
+              {new Date(run.triggeredAt).toLocaleDateString()} — {run.status}
+            </TooltipContent>
+          )}
+        </Tooltip>
+      ))}
+    </div>
   );
 }
 
@@ -558,7 +558,7 @@ export function Status() {
   const [drawerRoutine, setDrawerRoutine] = useState<RoutineListItem | null>(null);
   const [collapsedAgents, setCollapsedAgents] = useState<Set<string>>(new Set());
 
-  const window = (searchParams.get("window") as TimeWindow) || "today";
+  const timeWindow = (searchParams.get("window") as TimeWindow) || "today";
   const agentFilter = searchParams.get("agent") || "__all";
 
   useEffect(() => {
@@ -653,7 +653,7 @@ export function Status() {
   // KPI calculations
   const kpis = useMemo(() => {
     const allRows = routineRows;
-    const runsToday = (routines ?? []).filter((r) => r.lastRun && isRunInWindow(r.lastRun, window)).length;
+    const runsToday = (routines ?? []).filter((r) => r.lastRun && isRunInWindow(r.lastRun, timeWindow)).length;
     const failedCount = allRows.filter((r) => r.state === "failed").length;
     const approvalCount = pendingApprovals?.length ?? 0;
     const totalAgents = dashboardSummary
@@ -664,7 +664,7 @@ export function Status() {
       : agents?.filter((a) => a.status === "active" || a.status === "running").length ?? 0;
 
     return { runsToday, failedCount, approvalCount, healthyAgents, totalAgents };
-  }, [routineRows, routines, pendingApprovals, dashboardSummary, agents, window]);
+  }, [routineRows, routines, pendingApprovals, dashboardSummary, agents, timeWindow]);
 
   // Auto-collapse fully-green agents when total > 5
   useEffect(() => {
@@ -687,7 +687,7 @@ export function Status() {
     });
   }, []);
 
-  const windowLabel = window === "today" ? "Runs today" : window === "7d" ? "Runs (7d)" : "Runs (30d)";
+  const windowLabel = timeWindow === "today" ? "Runs today" : timeWindow === "7d" ? "Runs (7d)" : "Runs (30d)";
 
   // Loading / Error / Empty states
   if (!selectedCompanyId) {
@@ -722,6 +722,7 @@ export function Status() {
   }
 
   return (
+    <TooltipProvider>
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -734,7 +735,7 @@ export function Status() {
                 key={w}
                 className={cn(
                   "px-2.5 py-1 rounded-sm transition-colors",
-                  window === w
+                  timeWindow === w
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground",
                 )}
@@ -879,6 +880,7 @@ export function Status() {
         onClose={() => setDrawerRoutine(null)}
       />
     </div>
+    </TooltipProvider>
   );
 }
 
