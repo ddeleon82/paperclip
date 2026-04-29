@@ -37,6 +37,21 @@ The scaffold tool's actual behavior differs from what was assumed. Subsequent ta
 4. **Manifest format is a TS module (`src/manifest.ts`)** that exports the manifest object, not a static `plugin.manifest.json`. The "Files" lines in subsequent tasks that reference `plugin.manifest.json` should target `src/manifest.ts` instead.
 5. **Install requires dev deps.** If running with `NODE_ENV=production`, use `NODE_ENV=development pnpm install --no-frozen-lockfile`. Lockfile changes from this are expected and should be committed.
 
+### Plan Deviations from Tasks 2-6 (SDK reality vs plan assumptions)
+
+The Paperclip Plugin SDK API differs from the plan's assumptions in 4 places. **All subsequent UI tasks must use the real API names:**
+
+6. **Capability names:** `"http.fetch"` -> **`"http.outbound"`**; `"secrets.read"` -> **`"secrets.read-ref"`**.
+7. **Secret read API:** `ctx.secrets.read("KEY")` does NOT exist. Real API is **`ctx.secrets.resolve(secretRef)`**.
+8. **No inbound HTTP routes for plugins.** Plugins cannot register Express routes. Routes are implemented as **actions** via `ctx.actions.register("action.name", handler)`. UI calls via **`usePluginAction("action.name")`**. Implemented:
+   - `voice.transcribe` — input `{audioBase64, mime}`, output `{transcript, audioId}`
+   - `voice.speak` — input `{text, voiceId}`, output `{audioBase64}` (base64-encoded mp3; UI must decode to Blob)
+9. **State storage API:** `ctx.storage.get/set` does NOT exist. Real API is **`ctx.state.get/set(scopeKey, value)`**. Used in Task 13 for per-agent voice mapping.
+
+### Secret Registration Blocker (manual action required from Dom)
+
+Task 2b attempted `POST /api/companies/.../secrets` programmatically — endpoint requires board-level auth, and the agent's `PAPERCLIP_API_KEY` JWT does not have board access. **Dom must register `ELEVENLABS_API_KEY` manually** via Instance Settings UI (or board CLI). Value: the "For Voice Assistant" key from `ElevenLabs API Keys vault item` in the team password vault. Until registered, the plugin's `voice.transcribe` and `voice.speak` actions will throw on `ctx.secrets.resolve()`. Smoke test (Task 14) is blocked on this.
+
 ---
 
 ## File Structure
