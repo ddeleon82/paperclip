@@ -27,6 +27,18 @@
 
 ---
 
+## Plan Deviations (discovered during Task 1 — apply to all subsequent tasks)
+
+The scaffold tool's actual behavior differs from what was assumed. Subsequent tasks should treat these as overrides:
+
+1. **Package name is unscoped: `voice-mode`** (not `@paperclipai/voice-mode`). All `pnpm --filter @paperclipai/voice-mode <cmd>` references in this plan should be read as `pnpm --filter voice-mode <cmd>`.
+2. **No `--capabilities` CLI flag.** Capabilities live in `src/manifest.ts` as a hardcoded array. Defaults: `["events.subscribe", "plugin.state.read", "plugin.state.write"]`. **Task 2 must edit `src/manifest.ts` to add `"http.fetch"` and `"secrets.read"`** before any vendor calls or secret reads.
+3. **Worker is a single file `src/worker.ts`**, not `src/worker/index.ts`. **Task 3 should restructure** by moving `src/worker.ts` → `src/worker/index.ts` and creating sibling files (`routes.ts`, `elevenlabs.ts`, `audio-store.ts`).
+4. **Manifest format is a TS module (`src/manifest.ts`)** that exports the manifest object, not a static `plugin.manifest.json`. The "Files" lines in subsequent tasks that reference `plugin.manifest.json` should target `src/manifest.ts` instead.
+5. **Install requires dev deps.** If running with `NODE_ENV=production`, use `NODE_ENV=development pnpm install --no-frozen-lockfile`. Lockfile changes from this are expected and should be committed.
+
+---
+
 ## File Structure
 
 **New plugin package:** `packages/plugins/voice-mode/` (in-repo for V1; can be extracted to its own repo later).
