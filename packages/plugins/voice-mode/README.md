@@ -21,6 +21,9 @@ curl -X POST http://127.0.0.1:3100/api/plugins/install \
   -d '{"packageName":"/home/USER/paperclip/packages/plugins/voice-mode","isLocalPath":true}'
 ```
 
+## Required secrets
+- `ELEVENLABS_API_KEY` — your ElevenLabs API key (Scribe + TTS access). Set via the Paperclip secrets API or Instance Settings UI.
+
 ## Build Options
 
 - `pnpm build` uses esbuild presets from `@paperclipai/plugin-sdk/bundlers`.
