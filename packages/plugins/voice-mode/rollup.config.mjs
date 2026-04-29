@@ -2,7 +2,7 @@ import { nodeResolve } from "@rollup/plugin-node-resolve";
 import typescript from "@rollup/plugin-typescript";
 import { createPluginBundlerPresets } from "@paperclipai/plugin-sdk/bundlers";
 
-const presets = createPluginBundlerPresets({ uiEntry: "src/ui/index.tsx" });
+const presets = createPluginBundlerPresets({ workerEntry: "src/worker/index.ts", uiEntry: "src/ui/index.tsx" });
 
 function withPlugins(config) {
   if (!config) return null;
