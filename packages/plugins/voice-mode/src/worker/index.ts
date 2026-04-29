@@ -6,6 +6,8 @@ import { registerRoutes } from "./routes.js";
 const ELEVENLABS_SECRET_REF = "ELEVENLABS_API_KEY";
 const SWEEP_MS = 60 * 60 * 1000; // hourly
 
+let sweepTimer: ReturnType<typeof setInterval> | undefined;
+
 const plugin = definePlugin({
   async setup(ctx) {
     // Resolve ElevenLabs API key from instance secrets
@@ -15,7 +17,7 @@ const plugin = definePlugin({
     const client = createElevenLabsClient({ apiKey });
     const store = createAudioStore({ ttlMs: 24 * 60 * 60 * 1000 });
 
-    // Register voice actions (transcribe, speak, audio.get)
+    // Register voice actions (voice.transcribe, voice.speak, voice.audio.get)
     registerRoutes(ctx, { client, store });
 
     // Health data endpoint
@@ -23,17 +25,12 @@ const plugin = definePlugin({
       return { status: "ok", checkedAt: new Date().toISOString() };
     });
 
-    // Hourly TTL sweeper
-    const sweepTimer = setInterval(() => {
+    // Hourly TTL sweeper — cleans up expired audio from in-memory store
+    sweepTimer = setInterval(() => {
       store.sweep().catch((err) => ctx.logger.error("voice-mode sweep failed", err));
     }, SWEEP_MS);
 
-    // Clear sweep interval on shutdown
     ctx.logger.info("voice-mode plugin setup complete");
-
-    // Store sweepTimer ref on global for shutdown cleanup
-    // onShutdown is defined at the definePlugin level below
-    (globalThis as Record<string, unknown>).__voiceModeSweepTimer = sweepTimer;
   },
 
   async onHealth() {
@@ -41,8 +38,10 @@ const plugin = definePlugin({
   },
 
   async onShutdown() {
-    const timer = (globalThis as Record<string, unknown>).__voiceModeSweepTimer;
-    if (timer) clearInterval(timer as ReturnType<typeof setInterval>);
+    if (sweepTimer !== undefined) {
+      clearInterval(sweepTimer);
+      sweepTimer = undefined;
+    }
   },
 });
 
