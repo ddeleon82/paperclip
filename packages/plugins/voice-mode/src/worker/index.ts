@@ -20,6 +20,34 @@ const plugin = definePlugin({
     // Register voice actions (voice.transcribe, voice.speak, voice.audio.get)
     registerRoutes(ctx, { client, store });
 
+    // -----------------------------------------------------------------------
+    // Per-agent voice KV actions
+    //
+    // Stored at scope: { scopeKind: "instance", stateKey: "agentVoices" }
+    // Value shape: Record<agentId, voiceId>
+    // -----------------------------------------------------------------------
+
+    const AGENT_VOICES_SCOPE = {
+      scopeKind: "instance" as const,
+      stateKey: "agentVoices",
+    };
+
+    ctx.actions.register("voice.agentVoices.get", async () => {
+      const map = (await ctx.state.get(AGENT_VOICES_SCOPE)) ?? {};
+      return map as Record<string, string>;
+    });
+
+    ctx.actions.register("voice.agentVoices.set", async (params) => {
+      const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "";
+      const voiceId = typeof params.voiceId === "string" ? params.voiceId.trim() : "";
+      if (!agentId || !voiceId) throw new Error("agentId and voiceId required");
+      const existing = (await ctx.state.get(AGENT_VOICES_SCOPE)) ?? {};
+      const map = existing as Record<string, string>;
+      map[agentId] = voiceId;
+      await ctx.state.set(AGENT_VOICES_SCOPE, map);
+      return { ok: true };
+    });
+
     // Health data endpoint
     ctx.data.register("health", async () => {
       return { status: "ok", checkedAt: new Date().toISOString() };

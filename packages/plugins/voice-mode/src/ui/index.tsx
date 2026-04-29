@@ -18,10 +18,15 @@ import {
   usePluginAction,
   usePluginData,
   type PluginWidgetProps,
-  type PluginToolbarButtonProps,
 } from "@paperclipai/plugin-sdk/ui";
 import { VoiceComposerControls } from "./VoiceComposerControls";
 export { MessageSpeakerButton } from "./MessageSpeakerButton";
+export { VoiceSettingsPanel } from "./VoiceSettingsPanel.js";
+
+// PluginToolbarButtonProps is not yet in the SDK — use PluginWidgetProps as
+// a structural stand-in (same shape: { context: PluginHostContext }).
+// Replace once the SDK adds a typed toolbarButton prop interface.
+type PluginToolbarButtonProps = PluginWidgetProps;
 
 // ---------------------------------------------------------------------------
 // DashboardWidget — health status (pre-existing scaffold)

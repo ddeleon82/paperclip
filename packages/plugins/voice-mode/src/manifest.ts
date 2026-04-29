@@ -63,6 +63,14 @@ const manifest: PaperclipPluginManifestV1 = {
         displayName: "Voice Message Speaker",
         exportName: "MessageSpeakerButton",
         entityTypes: ["comment"]
+      },
+      {
+        // Plugin settings page — per-agent voice picker.
+        // settingsPage is a valid slot type in PLUGIN_UI_SLOT_TYPES.
+        type: "settingsPage",
+        id: "voice-settings",
+        displayName: "Voice Mode",
+        exportName: "VoiceSettingsPanel"
       }
     ]
   }
