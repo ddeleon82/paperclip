@@ -315,6 +315,7 @@ function CommentCard({
     <div
       key={comment.id}
       id={`comment-${comment.id}`}
+      data-comment-id={comment.id}
       className={`border p-3 overflow-hidden min-w-0 rounded-sm transition-colors duration-1000 ${
         isQueued
           ? "border-amber-300/70 bg-amber-50/70 dark:border-amber-500/40 dark:bg-amber-500/10"
@@ -761,6 +762,23 @@ export function CommentThread({
     setReassignTarget(effectiveSuggestedAssigneeValue);
   }, [effectiveSuggestedAssigneeValue]);
 
+  // Voice mode plugin auto-send: a `voice-mode:auto-send` CustomEvent dispatched
+  // anywhere on the page (typically from the voice-mode plugin's mic button)
+  // is treated as a transcribed comment to submit. Single source of truth for
+  // wiring the plugin into the composer without a dedicated chat-composer slot.
+  const handleSubmitRef = useRef<((override?: string) => Promise<void>) | null>(null);
+  handleSubmitRef.current = handleSubmit;
+  useEffect(() => {
+    function onAutoSend(e: Event) {
+      const detail = (e as CustomEvent).detail;
+      const text = typeof detail === "string" ? detail : detail?.text;
+      if (typeof text !== "string" || !text.trim()) return;
+      void handleSubmitRef.current?.(text);
+    }
+    window.addEventListener("voice-mode:auto-send", onAutoSend);
+    return () => window.removeEventListener("voice-mode:auto-send", onAutoSend);
+  }, []);
+
   // Scroll to comment when URL hash matches #comment-{id}
   useEffect(() => {
     const hash = location.hash;
@@ -779,8 +797,9 @@ export function CommentThread({
     }
   }, [location.hash, comments, queuedComments]);
 
-  async function handleSubmit() {
-    const trimmed = body.trim();
+  async function handleSubmit(overrideBody?: string) {
+    const source = typeof overrideBody === "string" ? overrideBody : body;
+    const trimmed = source.trim();
     if (!trimmed) return;
     const hasReassignment = enableReassign && reassignTarget !== currentAssigneeValue;
     const reassignment = hasReassignment ? parseReassignment(reassignTarget) : null;
@@ -982,7 +1001,7 @@ export function CommentThread({
                 }}
               />
             )}
-            <Button size="sm" disabled={!canSubmit} onClick={handleSubmit}>
+            <Button size="sm" disabled={!canSubmit} onClick={() => void handleSubmit()}>
               {submitting ? "Posting..." : "Comment"}
             </Button>
           </div>
