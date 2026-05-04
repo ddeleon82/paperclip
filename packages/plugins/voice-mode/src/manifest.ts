@@ -16,6 +16,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "secrets.read-ref",
     "ui.action.register",
     "ui.commentAnnotation.register",
+    "ui.dashboardWidget.register",
+    "instance.settings.register",
   ],
   entrypoints: {
     worker: "./dist/worker.js",

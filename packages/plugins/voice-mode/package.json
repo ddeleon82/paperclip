@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "paperclipPlugin": {
-    "manifest": "./dist/manifest.js",
+    "manifest": "./dist/manifest-v2.js",
     "worker": "./dist/worker.js",
     "ui": "./dist/ui/"
   },
