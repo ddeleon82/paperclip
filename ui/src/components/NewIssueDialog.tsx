@@ -677,6 +677,21 @@ export function NewIssueDialog() {
     executionWorkspaceDefaultProjectId.current = null;
   }
 
+  // Voice-mode plugin: append transcribed text into the description.
+  // We ignore voice-mode:auto-send for new-issue creation since auto-creating
+  // an issue without a title is awkward UX.
+  useEffect(() => {
+    function onInsert(e: Event) {
+      const text = (e as CustomEvent<string>).detail;
+      if (typeof text !== "string" || !text.trim()) return;
+      setDescription((prev) => (prev ? `${prev} ${text}` : text));
+    }
+    window.addEventListener("voice-mode:transcript-insert", onInsert);
+    return () => {
+      window.removeEventListener("voice-mode:transcript-insert", onInsert);
+    };
+  }, []);
+
   function handleCompanyChange(companyId: string) {
     if (isSubIssueMode) return;
     if (companyId === effectiveCompanyId) return;

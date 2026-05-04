@@ -1554,6 +1554,9 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
   agentMap,
   composerDisabledReason = null,
   issueStatus,
+  companyId,
+  projectId,
+  issueId,
 }, forwardedRef) {
   const api = useAui();
   const [body, setBody] = useState("");
@@ -1599,6 +1602,41 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
       });
     },
   }), []);
+
+  // Voice-mode plugin integration:
+  // - `voice-mode:transcript-insert` -> append transcript to composer body for review
+  // - `voice-mode:auto-send` -> submit transcript directly as a comment
+  useEffect(() => {
+    function onInsert(e: Event) {
+      const text = (e as CustomEvent<string>).detail;
+      if (typeof text !== "string" || !text.trim()) return;
+      setBody((prev) => prev ? `${prev} ${text}` : text);
+    }
+    function onAutoSend(e: Event) {
+      const text = (e as CustomEvent<string>).detail;
+      if (typeof text !== "string" || !text.trim() || submitting) return;
+      void (async () => {
+        setSubmitting(true);
+        try {
+          await api.thread().append({
+            role: "user",
+            content: [{ type: "text", text: text.trim() }],
+            metadata: { custom: {} },
+            attachments: [],
+            runConfig: { custom: {} },
+          });
+        } finally {
+          setSubmitting(false);
+        }
+      })();
+    }
+    window.addEventListener("voice-mode:transcript-insert", onInsert);
+    window.addEventListener("voice-mode:auto-send", onAutoSend);
+    return () => {
+      window.removeEventListener("voice-mode:transcript-insert", onInsert);
+      window.removeEventListener("voice-mode:auto-send", onAutoSend);
+    };
+  }, [api, submitting]);
 
   async function handleSubmit() {
     const trimmed = body.trim();

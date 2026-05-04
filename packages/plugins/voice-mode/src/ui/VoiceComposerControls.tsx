@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from "react";
+import React, { useEffect, useCallback, useState } from "react";
 import { useVoiceMode } from "./useVoiceMode";
 import { useVoiceActions } from "./api";
 
@@ -24,6 +24,25 @@ function MicIcon({ size = 16 }: { size?: number }) {
       <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z" />
       <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
       <line x1="12" y1="19" x2="12" y2="22" />
+    </svg>
+  );
+}
+
+function SpinnerIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ animation: "voice-mode-spin 0.9s linear infinite" }}
+    >
+      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
     </svg>
   );
 }
@@ -102,15 +121,19 @@ export function VoiceComposerControls({
   } = useVoiceMode();
 
   const { transcribeAudio } = useVoiceActions();
+  const [transcribing, setTranscribing] = useState(false);
 
   // Handle blob from spacebar push-to-talk (dispatched by useVoiceMode)
   const handleTranscribeBlob = useCallback(
     async (blob: Blob) => {
+      setTranscribing(true);
       try {
         const { transcript } = await transcribeAudio(blob);
         if (transcript) onTranscript(transcript);
       } catch {
         // silently ignore transcription errors in V1
+      } finally {
+        setTranscribing(false);
       }
     },
     [transcribeAudio, onTranscript],
@@ -128,6 +151,7 @@ export function VoiceComposerControls({
   // Click-to-toggle recording
   const handleMicClick = async () => {
     if (!enabled) return;
+    if (transcribing) return;
     if (isSpeaking) {
       stopSpeaking();
       return;
@@ -140,19 +164,25 @@ export function VoiceComposerControls({
     }
   };
 
-  const micLabel = isRecording ? "Stop recording" : "Record voice input";
+  const micLabel = transcribing
+    ? "Transcribing..."
+    : isRecording
+      ? "Stop recording"
+      : "Record voice input";
 
   return (
     <div
       style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}
       className="voice-composer-controls"
     >
+      <style>{`@keyframes voice-mode-spin { to { transform: rotate(360deg); } }`}</style>
+
       {/* Voice mode toggle */}
       <button
         type="button"
         aria-label={`Voice mode ${enabled ? "on" : "off"}`}
         onClick={toggle}
-        title={`Voice mode: ${enabled ? "on" : "off"}`}
+        title={enabled ? "Voice mode: on (auto-sends)" : "Voice mode: off (inserts text)"}
         style={{
           display: "flex",
           alignItems: "center",
@@ -172,7 +202,7 @@ export function VoiceComposerControls({
         type="button"
         aria-label={micLabel}
         onClick={() => void handleMicClick()}
-        disabled={!enabled}
+        disabled={!enabled || transcribing}
         title={micLabel}
         style={{
           display: "flex",
@@ -180,12 +210,16 @@ export function VoiceComposerControls({
           padding: "0.25rem",
           background: "none",
           border: "none",
-          cursor: enabled ? "pointer" : "not-allowed",
-          color: isRecording ? "red" : "inherit",
+          cursor: enabled && !transcribing ? "pointer" : "not-allowed",
+          color: isRecording ? "red" : transcribing ? "#888" : "inherit",
           opacity: enabled ? 1 : 0.4,
         }}
       >
-        {isRecording ? <MicOffIcon size={16} /> : <MicIcon size={16} />}
+        {transcribing
+          ? <SpinnerIcon size={16} />
+          : isRecording
+            ? <MicOffIcon size={16} />
+            : <MicIcon size={16} />}
       </button>
     </div>
   );

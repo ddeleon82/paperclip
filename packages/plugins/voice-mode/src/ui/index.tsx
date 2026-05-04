@@ -20,6 +20,7 @@ import {
   type PluginWidgetProps,
 } from "@paperclipai/plugin-sdk/ui";
 import { VoiceComposerControls } from "./VoiceComposerControls";
+import { useVoiceMode } from "./useVoiceMode";
 export { MessageSpeakerButton } from "./MessageSpeakerButton";
 export { VoiceSettingsPanel } from "./VoiceSettingsPanel.js";
 
@@ -66,14 +67,16 @@ export function DashboardWidget(_props: PluginWidgetProps) {
 // ---------------------------------------------------------------------------
 
 export function VoiceComposerControlsSlot(_props: PluginToolbarButtonProps) {
+  const { enabled } = useVoiceMode();
+
   function handleTranscript(text: string) {
-    // Dispatch event for core to pick up and submit as a comment.
-    // When Task 11 adds the real chat-composer-trailing slot, this slot will
-    // receive an `onAutoSend` prop directly and this event dispatch will be
-    // replaced by a direct prop call.
-    window.dispatchEvent(
-      new CustomEvent("voice-mode:auto-send", { detail: text }),
-    );
+    // Two paths based on the voice mode toggle (the speaker icon):
+    // - enabled (on)  -> auto-send the transcript as a comment immediately
+    // - disabled (off) -> insert the transcript into the composer for review
+    // The host (IssueChatComposer + NewIssueDialog) listens for both events
+    // and reacts accordingly.
+    const eventName = enabled ? "voice-mode:auto-send" : "voice-mode:transcript-insert";
+    window.dispatchEvent(new CustomEvent(eventName, { detail: text }));
   }
 
   return <VoiceComposerControls onTranscript={handleTranscript} />;
