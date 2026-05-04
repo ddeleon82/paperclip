@@ -60,6 +60,50 @@ export function resolveViteHmrPort(serverPort: number): number {
   return Math.max(1_024, serverPort - 10_000);
 }
 
+function verifyUiDistFreshness(uiDist: string, candidates: string[], indexHtml: string): void {
+  const banner = "[paperclip:ui-dist]";
+
+  // 1. Did we fall back from server/ui-dist to ui/dist?
+  const preferred = candidates[0];
+  if (uiDist !== preferred && fs.existsSync(path.join(candidates[1] ?? "", "index.html"))) {
+    logger.warn(
+      { servingFrom: uiDist, preferred, fix: "pnpm --filter @paperclipai/server run prepare:ui-dist (or pnpm -r build)" },
+      `${banner} server/ui-dist/ missing — falling back to ui/dist/. Asset hash drift will break the dashboard after a UI rebuild.`,
+    );
+  }
+
+  // 2. Are server/ui-dist and ui/dist out of sync?
+  const serverDistIndex = path.join(preferred, "index.html");
+  const uiDistIndex = path.resolve(candidates[1] ?? "", "index.html");
+  try {
+    if (fs.existsSync(serverDistIndex) && fs.existsSync(uiDistIndex)) {
+      const serverMtime = fs.statSync(serverDistIndex).mtimeMs;
+      const uiMtime = fs.statSync(uiDistIndex).mtimeMs;
+      if (uiMtime - serverMtime > 5_000) {
+        logger.warn(
+          { serverMtime: new Date(serverMtime).toISOString(), uiMtime: new Date(uiMtime).toISOString(), driftMs: Math.round(uiMtime - serverMtime), fix: "pnpm --filter @paperclipai/server run prepare:ui-dist" },
+          `${banner} ui/dist/index.html is newer than server/ui-dist/index.html — assets are stale. Run prepare:ui-dist after each UI build.`,
+        );
+      }
+    }
+  } catch {
+    // mtime checks are best-effort
+  }
+
+  // 3. Do the assets referenced by index.html actually exist on disk?
+  const assetRefs = Array.from(indexHtml.matchAll(/\/assets\/([A-Za-z0-9_.-]+\.(?:js|css))/g)).map((m) => m[1]);
+  const missing: string[] = [];
+  for (const ref of assetRefs) {
+    if (!fs.existsSync(path.join(uiDist, "assets", ref))) missing.push(ref);
+  }
+  if (missing.length > 0) {
+    logger.error(
+      { uiDist, missingAssets: missing.slice(0, 10), totalMissing: missing.length, fix: "rebuild UI and run prepare:ui-dist" },
+      `${banner} ${missing.length} asset(s) referenced by index.html are missing on disk — dashboard will fail to render. Browser will see HTML 200 for CSS/JS instead of real content.`,
+    );
+  }
+}
+
 export async function createApp(
   db: Db,
   opts: {
@@ -258,7 +302,9 @@ export async function createApp(
     ];
     const uiDist = candidates.find((p) => fs.existsSync(path.join(p, "index.html")));
     if (uiDist) {
-      const indexHtml = applyUiBranding(fs.readFileSync(path.join(uiDist, "index.html"), "utf-8"));
+      const indexHtmlRaw = fs.readFileSync(path.join(uiDist, "index.html"), "utf-8");
+      const indexHtml = applyUiBranding(indexHtmlRaw);
+      verifyUiDistFreshness(uiDist, candidates, indexHtmlRaw);
       app.use(express.static(uiDist));
       app.get(/.*/, (_req, res) => {
         res.status(200).set("Content-Type", "text/html").end(indexHtml);

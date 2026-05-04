@@ -40,6 +40,7 @@ import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
+import { runningProcesses } from "./adapters/index.js";
 
 type BetterAuthSessionUser = {
   id: string;
@@ -739,6 +740,30 @@ export async function startServer(): Promise<StartedServer> {
       if (telemetryClient) {
         telemetryClient.stop();
         await telemetryClient.flush();
+      }
+
+      const activeCount = runningProcesses.size;
+      if (activeCount > 0) {
+        const drainDeadlineMs = Number(process.env.PAPERCLIP_SHUTDOWN_DRAIN_MS ?? 90_000);
+        logger.info(
+          { signal, activeRuns: activeCount, drainDeadlineMs },
+          "Draining active agent runs before shutdown",
+        );
+        for (const [, rp] of runningProcesses) {
+          try {
+            rp.child.kill("SIGINT");
+          } catch (err) {
+            logger.warn({ err }, "Failed to send SIGINT to child run process");
+          }
+        }
+        const deadline = Date.now() + drainDeadlineMs;
+        while (runningProcesses.size > 0 && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        logger.info(
+          { remainingRuns: runningProcesses.size },
+          "Drain complete (remaining runs will be killed by process exit)",
+        );
       }
 
       if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
