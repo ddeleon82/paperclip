@@ -33,24 +33,14 @@ const manifest: PaperclipPluginManifestV1 = {
         exportName: "DashboardWidget"
       },
       {
-        // Composer mic/toggle controls.
-        //
-        // NOTE: `chat-composer-trailing` does NOT exist in core slot types.
-        // The closest available slot is `toolbarButton` on the `issue` entity,
-        // which renders in the issue toolbar. Task 11 will need to add a real
-        // `chat-composer-trailing` slot to core IssueChatThread.tsx and add it
-        // to the slot type registry — at that point change this to:
-        //   type: "chat-composer-trailing"
-        //   entityTypes: ["issue"]
-        //
-        // Using toolbarButton on issue as the interim mount point so the slot
-        // is declared and the component is wired. The UX will land in the
-        // toolbar rather than the composer until Task 11 adds core slot support.
-        type: "toolbarButton",
+        // Composer mic/toggle controls — renders inline next to the Send/Create
+        // button in IssueChatComposer (issue thread reply) and NewIssueDialog
+        // (new issue creation). composerTrailing is entity-agnostic so the
+        // same component mounts in both surfaces.
+        type: "composerTrailing",
         id: "voice-composer-controls",
         displayName: "Voice Composer Controls",
-        exportName: "VoiceComposerControlsSlot",
-        entityTypes: ["issue"]
+        exportName: "VoiceComposerControlsSlot"
       },
       {
         // Per-comment TTS play button.

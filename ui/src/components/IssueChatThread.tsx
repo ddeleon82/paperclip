@@ -65,6 +65,7 @@ import { Identity } from "./Identity";
 import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySelector";
 import { AgentIcon } from "./AgentIconPicker";
 import { restoreSubmittedCommentDraft } from "../lib/comment-submit-draft";
+import { PluginSlotOutlet } from "@/plugins/slots";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import { timeAgo } from "../lib/timeAgo";
 import {
@@ -176,6 +177,9 @@ interface IssueChatComposerProps {
   agentMap?: Map<string, Agent>;
   composerDisabledReason?: string | null;
   issueStatus?: string;
+  companyId?: string | null;
+  projectId?: string | null;
+  issueId?: string | null;
 }
 
 interface IssueChatThreadProps {
@@ -189,6 +193,7 @@ interface IssueChatThreadProps {
   activeRun?: ActiveRunForIssue | null;
   companyId?: string | null;
   projectId?: string | null;
+  issueId?: string | null;
   issueStatus?: string;
   agentMap?: Map<string, Agent>;
   currentUserId?: string | null;
@@ -1752,6 +1757,19 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
           />
         ) : null}
 
+        {companyId ? (
+          <PluginSlotOutlet
+            slotTypes={["composerTrailing"]}
+            entityType="issue"
+            context={{
+              companyId,
+              projectId: projectId ?? undefined,
+              entityId: issueId ?? undefined,
+              entityType: "issue",
+            }}
+          />
+        ) : null}
+
         <Button size="sm" disabled={!canSubmit} onClick={() => void handleSubmit()}>
           {submitting ? "Posting..." : "Send"}
         </Button>
@@ -1771,6 +1789,7 @@ export function IssueChatThread({
   activeRun = null,
   companyId,
   projectId,
+  issueId,
   issueStatus,
   agentMap,
   currentUserId,
@@ -1999,6 +2018,9 @@ export function IssueChatThread({
             agentMap={agentMap}
             composerDisabledReason={composerDisabledReason}
             issueStatus={issueStatus}
+            companyId={companyId}
+            projectId={projectId}
+            issueId={issueId}
           />
         ) : null}
       </div>

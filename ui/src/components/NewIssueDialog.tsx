@@ -14,6 +14,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { useProjectOrder } from "../hooks/useProjectOrder";
 import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
 import { buildExecutionPolicy } from "../lib/issue-execution-policy";
+import { PluginSlotOutlet } from "@/plugins/slots";
 import { useToast } from "../context/ToastContext";
 import {
   assigneeValueFromSelection,
@@ -1680,6 +1681,17 @@ export function NewIssueDialog() {
                 <span className="text-xs text-destructive">{createIssueErrorMessage}</span>
               ) : null}
             </div>
+            {effectiveCompanyId ? (
+              <PluginSlotOutlet
+                slotTypes={["composerTrailing"]}
+                entityType="issue"
+                context={{
+                  companyId: effectiveCompanyId,
+                  projectId: projectId || undefined,
+                  entityType: "issue",
+                }}
+              />
+            ) : null}
             <Button
               size="sm"
               className="min-w-[8.5rem] disabled:opacity-100"

@@ -2167,6 +2167,7 @@ export function IssueDetail() {
                 activeRun={activeRun}
                 companyId={issue.companyId}
                 projectId={issue.projectId}
+                issueId={issue.id}
                 issueStatus={issue.status}
                 agentMap={agentMap}
                 currentUserId={currentUserId}
