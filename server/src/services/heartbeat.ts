@@ -1764,6 +1764,37 @@ export function heartbeatService(db: Db) {
       .where(eq(agentWakeupRequests.id, wakeupRequestId));
   }
 
+  // FRE-947 P0.2: Best-effort cleanup wrapper used when the primary failure-recording
+  // path in executeRun's outer catch itself throws. Surfaces structured errors instead
+  // of the prior silent `.catch(() => undefined)` swallowers, and tries to mark the
+  // wake request as failed so it stops looking "claimed" forever.
+  async function recordWakeFailure(
+    wakeupRequestId: string | null | undefined,
+    runId: string,
+    stage: string,
+    err: unknown,
+  ) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, runId, wakeupRequestId, stage }, "heartbeat setup-failure recording threw");
+    if (!wakeupRequestId) return;
+    try {
+      await db
+        .update(agentWakeupRequests)
+        .set({
+          status: "failed",
+          finishedAt: new Date(),
+          error: `[${stage}] ${message}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(agentWakeupRequests.id, wakeupRequestId));
+    } catch (writeErr) {
+      logger.error(
+        { err: writeErr, runId, wakeupRequestId, stage },
+        "heartbeat recordWakeFailure: failed to mark wake request as failed",
+      );
+    }
+  }
+
   async function appendRunEvent(
     run: typeof heartbeatRuns.$inferSelect,
     seq: number,
@@ -3456,40 +3487,84 @@ export function heartbeatService(db: Db) {
     } catch (outerErr) {
           // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
           // The inner catch did not fire, so we must record the failure here.
+          // FRE-947 P0.2: All best-effort writes that previously did `.catch(() => undefined)`
+          // now log structured errors and (where possible) still mark the wake request as failed.
           const message = outerErr instanceof Error ? outerErr.message : "Unknown setup failure";
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
-          await setRunStatus(runId, "failed", {
-            error: message,
-            errorCode: "adapter_failed",
-            finishedAt: new Date(),
-          }).catch(() => undefined);
-          await setWakeupStatus(run.wakeupRequestId, "failed", {
-            finishedAt: new Date(),
-            error: message,
-          }).catch(() => undefined);
-          const failedRun = await getRun(runId).catch(() => null);
+          try {
+            await setRunStatus(runId, "failed", {
+              error: message,
+              errorCode: "adapter_failed",
+              finishedAt: new Date(),
+            });
+          } catch (e) {
+            await recordWakeFailure(run.wakeupRequestId, runId, "setRunStatus", e);
+          }
+          try {
+            await setWakeupStatus(run.wakeupRequestId, "failed", {
+              finishedAt: new Date(),
+              error: message,
+            });
+          } catch (e) {
+            await recordWakeFailure(run.wakeupRequestId, runId, "setWakeupStatus", e);
+          }
+          const failedRun = await getRun(runId).catch((e) => {
+            logger.error({ err: e, runId }, "heartbeat setup-failure: getRun threw");
+            return null;
+          });
           if (failedRun) {
             // Emit a run-log event so the failure is visible in the run timeline,
             // consistent with what the inner catch block does for adapter failures.
-            await appendRunEvent(failedRun, 1, {
-              eventType: "error",
-              stream: "system",
-              level: "error",
-              message,
-            }).catch(() => undefined);
-            const failedAgent = await getAgent(run.agentId).catch(() => null);
-            if (failedAgent) {
-              await finalizeIssueCommentPolicy(failedRun, failedAgent).catch(() => undefined);
+            try {
+              await appendRunEvent(failedRun, 1, {
+                eventType: "error",
+                stream: "system",
+                level: "error",
+                message,
+              });
+            } catch (e) {
+              logger.error({ err: e, runId }, "heartbeat setup-failure: appendRunEvent threw");
             }
-            await releaseIssueExecutionAndPromote(failedRun).catch(() => undefined);
+            const failedAgent = await getAgent(run.agentId).catch((e) => {
+              logger.error({ err: e, runId, agentId: run.agentId }, "heartbeat setup-failure: getAgent threw");
+              return null;
+            });
+            if (failedAgent) {
+              try {
+                await finalizeIssueCommentPolicy(failedRun, failedAgent);
+              } catch (e) {
+                logger.error({ err: e, runId }, "heartbeat setup-failure: finalizeIssueCommentPolicy threw");
+              }
+            }
+            try {
+              await releaseIssueExecutionAndPromote(failedRun);
+            } catch (e) {
+              logger.error({ err: e, runId }, "heartbeat setup-failure: releaseIssueExecutionAndPromote threw");
+            }
           }
           // Ensure the agent is not left stuck in "running" if the inner catch handler's
           // DB calls threw (e.g. a transient DB error in finalizeAgentStatus).
-          await finalizeAgentStatus(run.agentId, "failed").catch(() => undefined);
+          try {
+            await finalizeAgentStatus(run.agentId, "failed");
+          } catch (e) {
+            logger.error({ err: e, runId, agentId: run.agentId }, "heartbeat setup-failure: finalizeAgentStatus threw");
+          }
         } finally {
-          await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
+          // FRE-947 P0.1: Guard the post-run hand-off so a throw here does not kill the host.
+          try {
+            await releaseRuntimeServicesForRun(run.id);
+          } catch (e) {
+            logger.error({ err: e, runId: run.id }, "heartbeat finally: releaseRuntimeServicesForRun threw");
+          }
           activeRunExecutions.delete(run.id);
-          await startNextQueuedRunForAgent(run.agentId);
+          try {
+            await startNextQueuedRunForAgent(run.agentId);
+          } catch (e) {
+            logger.error(
+              { err: e, runId: run.id, agentId: run.agentId },
+              "heartbeat finally: startNextQueuedRunForAgent threw",
+            );
+          }
         }
   }
 
@@ -3644,7 +3719,17 @@ export function heartbeatService(db: Db) {
       },
     });
 
-    await startNextQueuedRunForAgent(promotedRun.agentId);
+    // FRE-947 P0.1: Guard the promoted-run hand-off so a downstream throw does not
+    // unwind the caller (executeRun's outer catch already logs; other callers like
+    // cancelRun would otherwise lose context).
+    try {
+      await startNextQueuedRunForAgent(promotedRun.agentId);
+    } catch (e) {
+      logger.error(
+        { err: e, runId: promotedRun.id, agentId: promotedRun.agentId },
+        "releaseIssueExecutionAndPromote: startNextQueuedRunForAgent threw",
+      );
+    }
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}) {
