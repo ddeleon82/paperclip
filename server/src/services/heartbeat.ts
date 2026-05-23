@@ -2610,7 +2610,12 @@ export function heartbeatService(db: Db) {
         const deferredPayload = parseObject(deferred.payload);
         const deferredContextSeed = parseObject(deferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
         const promotedContextSeed: Record<string, unknown> = { ...deferredContextSeed };
-        const promotedReason = readNonEmptyString(deferred.reason) ?? "issue_execution_promoted";
+        // Always use "issue_execution_promoted" as the wake reason for the promoted run.
+        // Inheriting the original deferred.reason (e.g. "issue_assigned") would cause
+        // shouldResetTaskSessionForWake() to discard the agent's saved session even
+        // though this run is a continuation of prior work, not a fresh assignment.
+        delete promotedContextSeed.wakeReason;
+        const promotedReason = "issue_execution_promoted";
         const promotedSource =
           (readNonEmptyString(deferred.source) as WakeupOptions["source"]) ?? "automation";
         const promotedTriggerDetail =
@@ -3868,7 +3873,12 @@ export function heartbeatService(db: Db) {
         const deferredPayload = parseObject(deferred.payload);
         const deferredContextSeed = parseObject(deferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
         const promotedContextSeed: Record<string, unknown> = { ...deferredContextSeed };
-        const promotedReason = readNonEmptyString(deferred.reason) ?? "issue_execution_promoted";
+        // Always use "issue_execution_promoted" as the wake reason for the promoted run.
+        // Inheriting the original deferred.reason (e.g. "issue_assigned") would cause
+        // shouldResetTaskSessionForWake() to discard the agent's saved session even
+        // though this run is a continuation of prior work, not a fresh assignment.
+        delete promotedContextSeed.wakeReason;
+        const promotedReason = "issue_execution_promoted";
         const promotedSource =
           (readNonEmptyString(deferred.source) as WakeupOptions["source"]) ?? "automation";
         const promotedTriggerDetail =

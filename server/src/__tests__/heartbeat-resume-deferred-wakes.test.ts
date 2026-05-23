@@ -189,6 +189,12 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
     expect(newRuns).toHaveLength(1);
     expect(["queued", "running"]).toContain(newRuns[0]?.status);
 
+    // The promoted run must carry "issue_execution_promoted" in its contextSnapshot.
+    // If it inherited the original "issue_assigned" reason the adapter would call
+    // shouldResetTaskSessionForWake() → true and discard the agent's saved session.
+    const promotedSnapshot = newRuns[0]?.contextSnapshot as Record<string, unknown> | null;
+    expect(promotedSnapshot?.wakeReason).toBe("issue_execution_promoted");
+
     // Issue execution slot is now held by the promoted run.
     const issue = await db
       .select()

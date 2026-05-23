@@ -329,6 +329,13 @@ describe("shouldResetTaskSessionForWake", () => {
     expect(shouldResetTaskSessionForWake({ wakeReason: "issue_commented" })).toBe(false);
   });
 
+  it("does not reset for promoted deferred wakes (issue_execution_promoted)", () => {
+    // A deferred wake promoted via promoteDeferredWakesForIssue uses
+    // "issue_execution_promoted" as its wakeReason. Session must be preserved
+    // so the agent resumes where it left off rather than starting fresh.
+    expect(shouldResetTaskSessionForWake({ wakeReason: "issue_execution_promoted" })).toBe(false);
+  });
+
   it("does not reset when wake reason is missing", () => {
     expect(shouldResetTaskSessionForWake({})).toBe(false);
   });
