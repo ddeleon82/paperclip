@@ -2471,6 +2471,234 @@ export function heartbeatService(db: Db) {
     for (const agentId of agentIds) {
       await startNextQueuedRunForAgent(agentId);
     }
+
+    // FRE-947 P0.3: Resurrect orphaned `deferred_issue_execution` wake requests.
+    // Before this, a host crash between "issue release" and "promote next deferred wake"
+    // would leave deferred wakes pending forever. On startup we now find every issue
+    // referenced by a deferred wake whose blocker has cleared (executionRunId IS NULL
+    // OR points to a terminal heartbeat run) and run the promotion path for it.
+    const TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
+    const orphanCandidates = await db
+      .select({
+        issueId: sql<string>`${agentWakeupRequests.payload} ->> 'issueId'`,
+        companyId: agentWakeupRequests.companyId,
+      })
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.status, "deferred_issue_execution"),
+          sql`${agentWakeupRequests.payload} ->> 'issueId' IS NOT NULL`,
+        ),
+      );
+
+    const seen = new Set<string>();
+    for (const row of orphanCandidates) {
+      if (!row.issueId) continue;
+      const key = `${row.companyId}:${row.issueId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const issue = await db
+        .select({ id: issues.id, companyId: issues.companyId, executionRunId: issues.executionRunId })
+        .from(issues)
+        .where(and(eq(issues.companyId, row.companyId), eq(issues.id, row.issueId)))
+        .then((rows) => rows[0] ?? null);
+      if (!issue) continue;
+
+      let blockerCleared = issue.executionRunId === null;
+      if (!blockerCleared && issue.executionRunId) {
+        const blocker = await db
+          .select({ status: heartbeatRuns.status })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, issue.executionRunId))
+          .then((rows) => rows[0] ?? null);
+        if (!blocker || (TERMINAL_STATUSES as readonly string[]).includes(blocker.status)) {
+          blockerCleared = true;
+        }
+      }
+      if (!blockerCleared) continue;
+
+      try {
+        await promoteDeferredWakesForIssue(issue.companyId, issue.id);
+        logger.info(
+          { companyId: issue.companyId, issueId: issue.id },
+          "resumeQueuedRuns: resurrected deferred wake for issue",
+        );
+      } catch (err) {
+        logger.error(
+          { err, companyId: issue.companyId, issueId: issue.id },
+          "resumeQueuedRuns: failed to resurrect deferred wake",
+        );
+      }
+    }
+  }
+
+  // FRE-947 P0.3: Extracted from releaseIssueExecutionAndPromote so that
+  // resumeQueuedRuns can promote deferred wakes without holding a stale terminal-run
+  // reference. Clears the issue's executionRunId (if any) and promotes the
+  // oldest invokable deferred wake into a queued run, mirroring the inner loop of
+  // releaseIssueExecutionAndPromote. Returns the promoted run id, or null if none.
+  async function promoteDeferredWakesForIssue(
+    companyId: string,
+    issueId: string,
+  ): Promise<string | null> {
+    const promotedRun = await db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select id from issues where company_id = ${companyId} and id = ${issueId} for update`,
+      );
+
+      const issue = await tx
+        .select({ id: issues.id, companyId: issues.companyId, executionRunId: issues.executionRunId })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
+        .then((rows) => rows[0] ?? null);
+      if (!issue) return null;
+
+      if (issue.executionRunId !== null) {
+        await tx
+          .update(issues)
+          .set({
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(issues.id, issue.id));
+      }
+
+      while (true) {
+        const deferred = await tx
+          .select()
+          .from(agentWakeupRequests)
+          .where(
+            and(
+              eq(agentWakeupRequests.companyId, issue.companyId),
+              eq(agentWakeupRequests.status, "deferred_issue_execution"),
+              sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+            ),
+          )
+          .orderBy(asc(agentWakeupRequests.requestedAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (!deferred) return null;
+
+        const deferredAgent = await tx
+          .select()
+          .from(agents)
+          .where(eq(agents.id, deferred.agentId))
+          .then((rows) => rows[0] ?? null);
+
+        if (
+          !deferredAgent ||
+          deferredAgent.companyId !== issue.companyId ||
+          deferredAgent.status === "paused" ||
+          deferredAgent.status === "terminated" ||
+          deferredAgent.status === "pending_approval"
+        ) {
+          await tx
+            .update(agentWakeupRequests)
+            .set({
+              status: "failed",
+              finishedAt: new Date(),
+              error: "Deferred wake could not be promoted: agent is not invokable",
+              updatedAt: new Date(),
+            })
+            .where(eq(agentWakeupRequests.id, deferred.id));
+          continue;
+        }
+
+        const deferredPayload = parseObject(deferred.payload);
+        const deferredContextSeed = parseObject(deferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
+        const promotedContextSeed: Record<string, unknown> = { ...deferredContextSeed };
+        const promotedReason = readNonEmptyString(deferred.reason) ?? "issue_execution_promoted";
+        const promotedSource =
+          (readNonEmptyString(deferred.source) as WakeupOptions["source"]) ?? "automation";
+        const promotedTriggerDetail =
+          (readNonEmptyString(deferred.triggerDetail) as WakeupOptions["triggerDetail"]) ?? null;
+        const promotedPayload = deferredPayload;
+        delete promotedPayload[DEFERRED_WAKE_CONTEXT_KEY];
+
+        const {
+          contextSnapshot: promotedContextSnapshot,
+          taskKey: promotedTaskKey,
+        } = enrichWakeContextSnapshot({
+          contextSnapshot: promotedContextSeed,
+          reason: promotedReason,
+          source: promotedSource,
+          triggerDetail: promotedTriggerDetail,
+          payload: promotedPayload,
+        });
+
+        const sessionBefore =
+          readNonEmptyString(promotedContextSnapshot.resumeSessionDisplayId) ??
+          await resolveSessionBeforeForWakeup(deferredAgent, promotedTaskKey);
+        const now = new Date();
+        const newRun = await tx
+          .insert(heartbeatRuns)
+          .values({
+            companyId: deferredAgent.companyId,
+            agentId: deferredAgent.id,
+            invocationSource: promotedSource,
+            triggerDetail: promotedTriggerDetail,
+            status: "queued",
+            wakeupRequestId: deferred.id,
+            contextSnapshot: promotedContextSnapshot,
+            sessionIdBefore: sessionBefore,
+          })
+          .returning()
+          .then((rows) => rows[0]);
+
+        await tx
+          .update(agentWakeupRequests)
+          .set({
+            status: "queued",
+            reason: "issue_execution_promoted",
+            runId: newRun.id,
+            claimedAt: null,
+            finishedAt: null,
+            error: null,
+            updatedAt: now,
+          })
+          .where(eq(agentWakeupRequests.id, deferred.id));
+
+        await tx
+          .update(issues)
+          .set({
+            executionRunId: newRun.id,
+            executionAgentNameKey: normalizeAgentNameKey(deferredAgent.name),
+            executionLockedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id));
+
+        return newRun;
+      }
+    });
+
+    if (!promotedRun) return null;
+
+    publishLiveEvent({
+      companyId: promotedRun.companyId,
+      type: "heartbeat.run.queued",
+      payload: {
+        runId: promotedRun.id,
+        agentId: promotedRun.agentId,
+        invocationSource: promotedRun.invocationSource,
+        triggerDetail: promotedRun.triggerDetail,
+        wakeupRequestId: promotedRun.wakeupRequestId,
+      },
+    });
+
+    try {
+      await startNextQueuedRunForAgent(promotedRun.agentId);
+    } catch (e) {
+      logger.error(
+        { err: e, runId: promotedRun.id, agentId: promotedRun.agentId },
+        "promoteDeferredWakesForIssue: startNextQueuedRunForAgent threw",
+      );
+    }
+
+    return promotedRun.id;
   }
 
   async function updateRuntimeState(
