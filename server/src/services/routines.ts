@@ -822,6 +822,9 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         }
 
         // Keep the dispatch lock until the issue is linked to a queued heartbeat run.
+        // FRE-947 P0.5: queueIssueAssignmentWakeup now always rejects on failure
+        // (the rethrowOnError opt-in was removed). Awaiting here keeps the dispatch
+        // lock until the wake is queued or the failure surfaces to the caller.
         await queueIssueAssignmentWakeup({
           heartbeat,
           issue: createdIssue,
@@ -829,7 +832,6 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           mutation: "create",
           contextSource: "routine.dispatch",
           requestedByActorType: input.source === "schedule" ? "system" : undefined,
-          rethrowOnError: true,
         });
         const updated = await finalizeRun(createdRun.id, {
           status: "issue_created",

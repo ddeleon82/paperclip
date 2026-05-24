@@ -270,4 +270,94 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
     expect(wake?.status).toBe("failed");
     expect(wake?.error).toContain("not invokable");
   });
+
+  it("resurrects work for a paused agent after it is resumed", async () => {
+    // Simulate the full lifecycle:
+    // 1. Blocker finishes → promotion fails the deferred wake because agent is paused.
+    // 2. Agent is set back to idle (resumed).
+    // 3. resurrectDeferredWakesForAgent is called → should queue a fresh wakeup.
+    const { deferredAgentId, issueId } = await seedScenario({
+      blockerStatus: "failed",
+      deferredAgentStatus: "paused",
+    });
+    const heartbeat = heartbeatService(db);
+
+    // Step 1: Promotion attempt — deferred wake is failed because agent is paused.
+    await heartbeat.resumeQueuedRuns();
+
+    const failedWake = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, deferredAgentId))
+      .then((rows) => rows[0] ?? null);
+    expect(failedWake?.status).toBe("failed");
+
+    // Step 2: Resume the agent (simulate the route's DB update).
+    await db
+      .update(agents)
+      .set({ status: "idle", pauseReason: null, pausedAt: null, updatedAt: new Date() })
+      .where(eq(agents.id, deferredAgentId));
+
+    // Step 3: Call resurrectDeferredWakesForAgent — should queue a new wakeup.
+    await heartbeat.resurrectDeferredWakesForAgent(deferredAgentId);
+
+    // A new wakeup request should exist for the agent targeting the issue.
+    const allWakes = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, deferredAgentId));
+
+    const fresh = allWakes.find((w) => w.status !== "failed");
+    expect(fresh).toBeDefined();
+    expect(["queued", "claimed", "running"]).toContain(fresh?.status);
+    expect(fresh?.reason).toBe("agent_resumed");
+
+    // The issue's payload should reference the correct issue.
+    const freshPayload = fresh?.payload as Record<string, unknown> | null;
+    expect(freshPayload?.issueId).toBe(issueId);
+  });
+
+  it("does NOT create duplicate wakeups if one is already queued for the issue", async () => {
+    // Same scenario as above: agent paused → deferred failed → agent resumed.
+    // But before resurrectDeferredWakesForAgent runs, someone already queued a
+    // wakeup for the agent+issue. We must not create a second one.
+    const { deferredAgentId, issueId, companyId } = await seedScenario({
+      blockerStatus: "failed",
+      deferredAgentStatus: "paused",
+    });
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+
+    // Resume the agent.
+    await db
+      .update(agents)
+      .set({ status: "idle", pauseReason: null, pausedAt: null, updatedAt: new Date() })
+      .where(eq(agents.id, deferredAgentId));
+
+    // Pre-seed an existing queued wakeup for the same agent+issue.
+    await db.insert(agentWakeupRequests).values({
+      id: randomUUID(),
+      companyId,
+      agentId: deferredAgentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "prior_queue_entry",
+      payload: { issueId },
+      status: "queued",
+      requestedAt: new Date(),
+    });
+
+    await heartbeat.resurrectDeferredWakesForAgent(deferredAgentId);
+
+    // Should still have exactly one non-failed wakeup (the pre-seeded one).
+    const nonFailed = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, deferredAgentId))
+      .then((rows) => rows.filter((r) => r.status !== "failed"));
+
+    expect(nonFailed).toHaveLength(1);
+    expect(nonFailed[0]?.reason).toBe("prior_queue_entry");
+  });
 });

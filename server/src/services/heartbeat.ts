@@ -21,6 +21,7 @@ import { conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
+import { safeForEach } from "./safe-iter.js";
 import { getServerAdapter, runningProcesses } from "../adapters/index.js";
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
@@ -2253,18 +2254,38 @@ export function heartbeatService(db: Db) {
     }
 
     const claimedAt = new Date();
-    const claimed = await db
-      .update(heartbeatRuns)
-      .set({
-        status: "running",
-        startedAt: run.startedAt ?? claimedAt,
-        updatedAt: claimedAt,
-      })
-      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
-      .returning()
-      .then((rows) => rows[0] ?? null);
+    // FRE-947 P0.8: wrap the heartbeatRuns → running and wakeup → claimed
+    // writes in a single transaction. Prior code did them as two independent
+    // statements; if the second threw (DB hiccup, deadlock, conn drop), the
+    // run was left at "running" while the wakeup stayed "queued", producing
+    // an orphan that confused reapOrphanedRuns and prevented retries.
+    // Atomic write: either both updates commit or neither does.
+    const claimed = await db.transaction(async (tx) => {
+      const claimedRow = await tx
+        .update(heartbeatRuns)
+        .set({
+          status: "running",
+          startedAt: run.startedAt ?? claimedAt,
+          updatedAt: claimedAt,
+        })
+        .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!claimedRow) return null;
+
+      if (claimedRow.wakeupRequestId) {
+        await tx
+          .update(agentWakeupRequests)
+          .set({ status: "claimed", claimedAt, updatedAt: new Date() })
+          .where(eq(agentWakeupRequests.id, claimedRow.wakeupRequestId));
+      }
+
+      return claimedRow;
+    });
     if (!claimed) return null;
 
+    // Notifications run AFTER the tx commits so subscribers never see a state
+    // we end up rolling back. Failures here do not corrupt persisted state.
     publishLiveEvent({
       companyId: claimed.companyId,
       type: "heartbeat.run.status",
@@ -2280,8 +2301,6 @@ export function heartbeatService(db: Db) {
         finishedAt: claimed.finishedAt ? new Date(claimed.finishedAt).toISOString() : null,
       },
     });
-
-    await setWakeupStatus(claimed.wakeupRequestId, "claimed", { claimedAt });
 
     // Fix A (lazy locking): stamp executionRunId now that the run is actually running,
     // not at queue time. Guard is idempotent — safe if called more than once.
@@ -2377,13 +2396,16 @@ export function heartbeatService(db: Db) {
 
     const reaped: string[] = [];
 
-    for (const { run, adapterType } of activeRuns) {
-      if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
+    // FRE-947 P0.6: wrap per-run reap in safeForEach so a single throw on one
+    // orphan (corrupt run, missing wakeup, FK weirdness) cannot abort the
+    // entire reap pass and leave every other orphan stuck in `running` forever.
+    await safeForEach(activeRuns, "reapOrphanedRuns", async ({ run, adapterType }) => {
+      if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) return;
 
       // Apply staleness threshold to avoid false positives
       if (staleThresholdMs > 0) {
         const refTime = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
-        if (now.getTime() - refTime < staleThresholdMs) continue;
+        if (now.getTime() - refTime < staleThresholdMs) return;
       }
 
       const tracksLocalChild = isTrackedLocalChildProcessAdapter(adapterType);
@@ -2406,7 +2428,7 @@ export function heartbeatService(db: Db) {
             });
           }
         }
-        continue;
+        return;
       }
 
       const shouldRetry = tracksLocalChild && !!run.processPid && (run.processLossRetryCount ?? 0) < 1;
@@ -2424,7 +2446,7 @@ export function heartbeatService(db: Db) {
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
       });
       if (!finalizedRun) finalizedRun = await getRun(run.id);
-      if (!finalizedRun) continue;
+      if (!finalizedRun) return;
 
       let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
       if (shouldRetry) {
@@ -2453,7 +2475,7 @@ export function heartbeatService(db: Db) {
       await startNextQueuedRunForAgent(run.agentId);
       runningProcesses.delete(run.id);
       reaped.push(run.id);
-    }
+    }, ({ run }) => run.id);
 
     if (reaped.length > 0) {
       logger.warn({ reapedCount: reaped.length, runIds: reaped }, "reaped orphaned heartbeat runs");
@@ -2468,9 +2490,17 @@ export function heartbeatService(db: Db) {
       .where(eq(heartbeatRuns.status, "queued"));
 
     const agentIds = [...new Set(queuedRuns.map((r) => r.agentId))];
-    for (const agentId of agentIds) {
-      await startNextQueuedRunForAgent(agentId);
-    }
+    // FRE-947 P0.6: per-agent try/catch so a corrupt or failing claim for one
+    // agent cannot abort the resume pass and strand every later agent's
+    // queued runs.
+    await safeForEach(
+      agentIds,
+      "resumeQueuedRuns",
+      async (agentId) => {
+        await startNextQueuedRunForAgent(agentId);
+      },
+      (agentId) => agentId,
+    );
 
     // FRE-947 P0.3: Resurrect orphaned `deferred_issue_execution` wake requests.
     // Before this, a host crash between "issue release" and "promote next deferred wake"
@@ -2704,6 +2734,156 @@ export function heartbeatService(db: Db) {
     }
 
     return promotedRun.id;
+  }
+
+  // Triggered when an agent transitions from "paused" → "idle" (agent resume).
+  // Scans for active issues this agent should work on — either issues directly
+  // assigned to this agent, or issues referenced in failed wakeup requests (i.e.
+  // issues the agent was queued to execute via a deferred wake that got failed
+  // while the agent was paused). For each qualifying issue it enqueues a fresh
+  // wakeup so the agent picks up work lost during the pause window.
+  async function resurrectDeferredWakesForAgent(agentId: string): Promise<void> {
+    const TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
+    const ACTIVE_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"] as const;
+
+    const agent = await db
+      .select()
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    if (!agent) return;
+
+    // Source 1: Active issues directly assigned to this agent.
+    const assignedIssues = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, agent.companyId),
+          eq(issues.assigneeAgentId, agentId),
+          inArray(issues.status, ACTIVE_ISSUE_STATUSES as unknown as string[]),
+        ),
+      );
+
+    // Source 2: Issues referenced in failed wakeup requests for this agent.
+    // These are wakes that were failed while the agent was paused (e.g. a
+    // deferred_issue_execution wake promoted during the pause window). The
+    // issue may be assigned to a different agent, so the assignedIssues query
+    // above would miss them.
+    const failedWakeRows = await db
+      .select({
+        issueId: sql<string>`${agentWakeupRequests.payload} ->> 'issueId'`,
+      })
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.status, "failed"),
+          sql`${agentWakeupRequests.payload} ->> 'issueId' IS NOT NULL`,
+        ),
+      );
+
+    const assignedIssueIds = new Set(assignedIssues.map((i) => i.id));
+    const extraIssueIds = [
+      ...new Set(failedWakeRows.map((r) => r.issueId).filter(Boolean)),
+    ].filter((id) => !assignedIssueIds.has(id));
+
+    const extraIssues =
+      extraIssueIds.length > 0
+        ? await db
+            .select({
+              id: issues.id,
+              companyId: issues.companyId,
+              executionRunId: issues.executionRunId,
+            })
+            .from(issues)
+            .where(
+              and(
+                eq(issues.companyId, agent.companyId),
+                inArray(issues.id, extraIssueIds),
+                inArray(issues.status, ACTIVE_ISSUE_STATUSES as unknown as string[]),
+              ),
+            )
+        : [];
+
+    const allIssues = [...assignedIssues, ...extraIssues];
+
+    // FRE-947 P0.6 follow-up (Kimi review): the per-issue body issues up to 3
+    // sequential DB queries (slot blocker check, existing-wakeup dedup,
+    // existing-run dedup) before the try/catch around enqueueWakeup. A transient
+    // throw in any of those earlier queries previously aborted the whole resume
+    // pass, stranding all later issues. Wrap the entire body in safeForEach so
+    // one bad row never wedges the rest.
+    await safeForEach(
+      allIssues,
+      "resurrectDeferredWakesForAgent",
+      async (issue) => {
+        // Check if the execution slot is free.
+        let slotFree = issue.executionRunId === null;
+        if (!slotFree && issue.executionRunId) {
+          const blocker = await db
+            .select({ status: heartbeatRuns.status })
+            .from(heartbeatRuns)
+            .where(eq(heartbeatRuns.id, issue.executionRunId))
+            .then((rows) => rows[0] ?? null);
+          if (!blocker || (TERMINAL_STATUSES as readonly string[]).includes(blocker.status)) {
+            slotFree = true;
+          }
+        }
+        if (!slotFree) return;
+
+        // Skip if there is already a pending wakeup (queued or deferred) for this
+        // agent targeting this issue — no need to duplicate it.
+        const existingWakeup = await db
+          .select({ id: agentWakeupRequests.id })
+          .from(agentWakeupRequests)
+          .where(
+            and(
+              eq(agentWakeupRequests.companyId, agent.companyId),
+              eq(agentWakeupRequests.agentId, agentId),
+              inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
+              sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (existingWakeup) return;
+
+        // Also skip if there is already a queued/running heartbeat run for this
+        // agent targeting this issue via contextSnapshot.
+        const existingRun = await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(
+            and(
+              eq(heartbeatRuns.agentId, agentId),
+              inArray(heartbeatRuns.status, ["queued", "running"]),
+              sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (existingRun) return;
+
+        await enqueueWakeup(agentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "agent_resumed",
+          payload: { issueId: issue.id },
+          requestedByActorType: "system",
+          requestedByActorId: "agent_resume",
+        });
+        logger.info(
+          { agentId, issueId: issue.id },
+          "resurrectDeferredWakesForAgent: queued wakeup for issue after agent resume",
+        );
+      },
+      (issue) => issue.id,
+    );
   }
 
   async function updateRuntimeState(
@@ -4803,34 +4983,43 @@ export function heartbeatService(db: Db) {
       let enqueued = 0;
       let skipped = 0;
 
-      for (const agent of allAgents) {
-        if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") continue;
-        const policy = parseHeartbeatPolicy(agent);
-        if (!policy.enabled || policy.intervalSec <= 0) continue;
+      // FRE-947 P0.6: per-agent try/catch so one bad policy or transient
+      // enqueueWakeup failure cannot abort the whole scheduler tick.
+      await safeForEach(
+        allAgents,
+        "tickTimers",
+        async (agent) => {
+          if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") return;
+          const policy = parseHeartbeatPolicy(agent);
+          if (!policy.enabled || policy.intervalSec <= 0) return;
 
-        checked += 1;
-        const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
-        const elapsedMs = now.getTime() - baseline;
-        if (elapsedMs < policy.intervalSec * 1000) continue;
+          checked += 1;
+          const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
+          const elapsedMs = now.getTime() - baseline;
+          if (elapsedMs < policy.intervalSec * 1000) return;
 
-        const run = await enqueueWakeup(agent.id, {
-          source: "timer",
-          triggerDetail: "system",
-          reason: "heartbeat_timer",
-          requestedByActorType: "system",
-          requestedByActorId: "heartbeat_scheduler",
-          contextSnapshot: {
-            source: "scheduler",
-            reason: "interval_elapsed",
-            now: now.toISOString(),
-          },
-        });
-        if (run) enqueued += 1;
-        else skipped += 1;
-      }
+          const run = await enqueueWakeup(agent.id, {
+            source: "timer",
+            triggerDetail: "system",
+            reason: "heartbeat_timer",
+            requestedByActorType: "system",
+            requestedByActorId: "heartbeat_scheduler",
+            contextSnapshot: {
+              source: "scheduler",
+              reason: "interval_elapsed",
+              now: now.toISOString(),
+            },
+          });
+          if (run) enqueued += 1;
+          else skipped += 1;
+        },
+        (agent) => agent.id,
+      );
 
       return { checked, enqueued, skipped };
     },
+
+    resurrectDeferredWakesForAgent,
 
     cancelRun: (runId: string) => cancelRunInternal(runId),
 

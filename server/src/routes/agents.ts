@@ -2000,6 +2000,12 @@ export function agentRoutes(db: Db) {
       entityId: agent.id,
     });
 
+    // Resurrect any deferred wakes that were failed while the agent was paused.
+    // Fire-and-forget — the response is not gated on this completing.
+    heartbeat.resurrectDeferredWakesForAgent(agent.id).catch((err) => {
+      console.error("resurrectDeferredWakesForAgent failed after resume", err);
+    });
+
     res.json(agent);
   });
 

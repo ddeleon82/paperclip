@@ -34,6 +34,7 @@ import {
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
 } from "./services/index.js";
+import { runHeartbeatRecovery } from "./services/heartbeat-recovery.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
@@ -580,12 +581,9 @@ export async function startServer(): Promise<StartedServer> {
   
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
-    void heartbeat
-      .reapOrphanedRuns()
-      .then(() => heartbeat.resumeQueuedRuns())
-      .catch((err) => {
-        logger.error({ err }, "startup heartbeat recovery failed");
-      });
+    // FRE-947 P0.7: runHeartbeatRecovery isolates each phase so a reap failure
+    // does not block resume (queued runs predate reap and are independently driveable).
+    void runHeartbeatRecovery(heartbeat);
     setInterval(() => {
       void heartbeat
         .tickTimers(new Date())
@@ -611,12 +609,8 @@ export async function startServer(): Promise<StartedServer> {
   
       // Periodically reap orphaned runs (5-min staleness threshold) and make sure
       // persisted queued work is still being driven forward.
-      void heartbeat
-        .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
-        .then(() => heartbeat.resumeQueuedRuns())
-        .catch((err) => {
-          logger.error({ err }, "periodic heartbeat recovery failed");
-        });
+      // FRE-947 P0.7: same isolation as startup — a reap throw must not block resume.
+      void runHeartbeatRecovery(heartbeat, { staleThresholdMs: 5 * 60 * 1000 });
     }, config.heartbeatSchedulerIntervalMs);
   }
   

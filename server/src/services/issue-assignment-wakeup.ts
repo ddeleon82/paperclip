@@ -26,10 +26,14 @@ export function queueIssueAssignmentWakeup(input: {
   contextSource: string;
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
-  rethrowOnError?: boolean;
 }) {
   if (!input.issue.assigneeAgentId || input.issue.status === "backlog") return;
 
+  // FRE-947 P0.5: never silently swallow assignment wake failures. Prior
+  // behavior `.catch(() => null)` made callers see a resolved promise and
+  // treat dropped wakes as successes, so assignees never re-entered the issue.
+  // Surface the error loudly and propagate; the caller's transaction / API
+  // handler decides whether to retry, alert, or fail the mutation.
   return input.heartbeat
     .wakeup(input.issue.assigneeAgentId, {
       source: "assignment",
@@ -41,8 +45,10 @@ export function queueIssueAssignmentWakeup(input: {
       contextSnapshot: { issueId: input.issue.id, source: input.contextSource },
     })
     .catch((err) => {
-      logger.warn({ err, issueId: input.issue.id }, "failed to wake assignee on issue assignment");
-      if (input.rethrowOnError) throw err;
-      return null;
+      logger.error(
+        { err, issueId: input.issue.id, mutation: input.mutation },
+        "failed to wake assignee on issue assignment",
+      );
+      throw err;
     });
 }
