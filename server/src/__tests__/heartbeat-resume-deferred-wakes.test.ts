@@ -27,6 +27,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { registerServerAdapter, unregisterServerAdapter } from "../adapters/registry.js";
 
 const mockTelemetryClient = vi.hoisted(() => ({ track: vi.fn() }));
 vi.mock("../telemetry.ts", () => ({
@@ -53,6 +54,26 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-resume-deferred-");
     db = createDb(tempDb.connectionString);
+    // Register a no-op mock adapter for `claude_local` so that
+    // startNextQueuedRunForAgent / executeRun triggered by the heartbeat service
+    // does NOT spawn a real Claude Code process. Tests only assert DB state;
+    // they do not need (or want) a live process connecting to the production API
+    // with ephemeral test credentials that don't exist in production.
+    registerServerAdapter({
+      type: "claude_local",
+      supportsLocalAgentJwt: true,
+      async execute() {
+        return { exitCode: 0, signal: null, timedOut: false };
+      },
+      async testEnvironment() {
+        return {
+          adapterType: "claude_local",
+          status: "pass" as const,
+          checks: [],
+          testedAt: new Date().toISOString(),
+        };
+      },
+    });
   }, 20_000);
 
   afterEach(async () => {
@@ -70,6 +91,7 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
   });
 
   afterAll(async () => {
+    unregisterServerAdapter("claude_local");
     await tempDb?.cleanup();
   });
 
@@ -317,6 +339,35 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
     expect(freshPayload?.issueId).toBe(issueId);
   });
 
+  it("does NOT promote a deferred wake whose company no longer exists (FK guard)", async () => {
+    // Simulate the scenario where a deferred wake references a company that has
+    // since been deleted (e.g. after a data purge or stale cross-instance wake delivery).
+    // The agents.company_id FK prevents normal CASCADE deletion, so we use
+    // session_replication_role='replica' to bypass FK enforcement during test setup only.
+    // The guard in promoteDeferredWakesForIssue (if (!promotionCompanyExists) return null)
+    // must bail out cleanly rather than letting the transaction hit a FK violation on
+    // heartbeat_runs.company_id.
+    const { companyId, deferredAgentId } = await seedScenario({
+      blockerStatus: "failed",
+    });
+    const heartbeat = heartbeatService(db);
+
+    // Bypass FK enforcement to simulate orphaned company (test setup only).
+    await db.execute(sql`SET session_replication_role = 'replica'`);
+    await db.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
+    await db.execute(sql`SET session_replication_role = 'origin'`);
+
+    // Should not throw — the company-existence guard returns null before any FK-violating insert.
+    await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
+
+    // No new heartbeat runs should have been created for the deferred agent.
+    const newRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, deferredAgentId));
+    expect(newRuns).toHaveLength(0);
+  });
+
   it("does NOT create duplicate wakeups if one is already queued for the issue", async () => {
     // Same scenario as above: agent paused → deferred failed → agent resumed.
     // But before resurrectDeferredWakesForAgent runs, someone already queued a
@@ -359,5 +410,68 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
 
     expect(nonFailed).toHaveLength(1);
     expect(nonFailed[0]?.reason).toBe("prior_queue_entry");
+  });
+
+  it("does NOT throw when resumeQueuedRuns encounters a fully deleted company", async () => {
+    // Regression: if a company is deleted (with CASCADE removing child rows) after a
+    // deferred wake was queued, resumeQueuedRuns must handle the absence gracefully
+    // rather than surfacing a FK violation mid-transaction.
+    const { companyId } = await seedScenario({ blockerStatus: "failed" });
+    const heartbeat = heartbeatService(db);
+
+    // Delete the company and all child rows in reverse-FK order.
+    // Postgres foreign keys on this schema do not carry ON DELETE CASCADE, so we
+    // must remove dependents before removing the parent to avoid constraint errors.
+    await db.execute(sql`DELETE FROM heartbeat_run_events WHERE company_id = ${companyId}`);
+    await db.execute(sql`DELETE FROM heartbeat_runs WHERE company_id = ${companyId}`);
+    await db.execute(sql`DELETE FROM agent_wakeup_requests WHERE company_id = ${companyId}`);
+    await db.execute(sql`DELETE FROM issues WHERE company_id = ${companyId}`);
+    await db.execute(sql`DELETE FROM agent_runtime_state WHERE agent_id IN (SELECT id FROM agents WHERE company_id = ${companyId})`);
+    await db.execute(sql`DELETE FROM agents WHERE company_id = ${companyId}`);
+    await db.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
+
+    // Must not throw — orphan candidate query finds no rows and exits silently.
+    await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
+
+    // No heartbeat runs should have been created for this (now-deleted) company.
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(sql`company_id = ${companyId}`);
+    expect(runs).toHaveLength(0);
+  });
+
+  it("does NOT throw when resurrectDeferredWakesForAgent finds its company deleted", async () => {
+    // Regression: if a company row is removed from the DB while its agent records
+    // still exist (orphaned via direct-DB cleanup / bypassed FKs), calling
+    // resurrectDeferredWakesForAgent must log a warning and return cleanly rather
+    // than hitting a FK constraint on heartbeat_runs.company_id.
+    const { deferredAgentId, companyId } = await seedScenario({
+      blockerStatus: "failed",
+      deferredAgentStatus: "idle",
+    });
+    const heartbeat = heartbeatService(db);
+
+    // Remove only the company row, leaving agents/issues/wakeups intact.
+    // SET LOCAL only applies within a transaction, so we wrap the delete in one.
+    // This bypasses FK triggers for the duration of the transaction, producing an
+    // orphaned-agent state without cascading to child rows.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = 'replica'`);
+      await tx.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
+    });
+
+    // Must not throw — the company-existence guard short-circuits and returns.
+    await expect(
+      heartbeat.resurrectDeferredWakesForAgent(deferredAgentId),
+    ).resolves.toBeUndefined();
+
+    // No new (non-deferred) wakeup requests should have been created.
+    const allWakes = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, deferredAgentId));
+    const nonDeferred = allWakes.filter((w) => w.status !== "deferred_issue_execution");
+    expect(nonDeferred).toHaveLength(0);
   });
 });
