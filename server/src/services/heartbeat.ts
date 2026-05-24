@@ -10,6 +10,7 @@ import {
   agentRuntimeState,
   agentTaskSessions,
   agentWakeupRequests,
+  companies,
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
@@ -2584,6 +2585,18 @@ export function heartbeatService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!issue) return null;
 
+      // Guard: skip promotion if the company no longer exists. Both heartbeat_runs and
+      // heartbeat_run_events carry a NOT NULL FK on company_id → companies.id. Attempting
+      // to create a run for an orphaned company would produce a FK violation that surfaces
+      // later as "heartbeat execution failed". Detect this early and fail the wake cleanly.
+      const promotionCompanyExists = await tx
+        .select({ id: companies.id })
+        .from(companies)
+        .where(eq(companies.id, issue.companyId))
+        .then((rows) => rows.length > 0);
+
+      if (!promotionCompanyExists) return null;
+
       if (issue.executionRunId !== null) {
         await tx
           .update(issues)
@@ -2752,6 +2765,23 @@ export function heartbeatService(db: Db) {
       .where(eq(agents.id, agentId))
       .then((rows) => rows[0] ?? null);
     if (!agent) return;
+
+    // Guard: if the agent's company no longer exists, any wakeup we queue (or any
+    // heartbeatRun we create) would fail with a FK violation on company_id. Skip
+    // resurrection entirely for orphaned agents rather than producing noisy errors.
+    const agentCompanyExists = await db
+      .select({ id: companies.id })
+      .from(companies)
+      .where(eq(companies.id, agent.companyId))
+      .then((rows) => rows.length > 0);
+
+    if (!agentCompanyExists) {
+      logger.warn(
+        { agentId, companyId: agent.companyId },
+        "resurrectDeferredWakesForAgent: skipping - company no longer exists",
+      );
+      return;
+    }
 
     // Source 1: Active issues directly assigned to this agent.
     const assignedIssues = await db
@@ -4044,6 +4074,30 @@ export function heartbeatService(db: Db) {
               status: "failed",
               finishedAt: new Date(),
               error: "Deferred wake could not be promoted: agent is not invokable",
+              updatedAt: new Date(),
+            })
+            .where(eq(agentWakeupRequests.id, deferred.id));
+          continue;
+        }
+
+
+        // Guard: verify the company still exists before inserting a heartbeatRun.
+        // Both heartbeat_runs and heartbeat_run_events carry a NOT NULL FK on
+        // company_id → companies.id. An orphaned company would cause a FK violation
+        // that surfaces as "heartbeat execution failed". Fail the wake cleanly instead.
+        const releaseCompanyExists = await tx
+          .select({ id: companies.id })
+          .from(companies)
+          .where(eq(companies.id, deferredAgent.companyId))
+          .then((rows) => rows.length > 0);
+
+        if (!releaseCompanyExists) {
+          await tx
+            .update(agentWakeupRequests)
+            .set({
+              status: "failed",
+              finishedAt: new Date(),
+              error: "Deferred wake could not be promoted: company no longer exists",
               updatedAt: new Date(),
             })
             .where(eq(agentWakeupRequests.id, deferred.id));
