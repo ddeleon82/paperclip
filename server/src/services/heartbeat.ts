@@ -3040,6 +3040,39 @@ export function heartbeatService(db: Db) {
       return;
     }
 
+    // FRE-947 P0.9: Guard against orphaned runs whose company was deleted after they were
+    // queued. heartbeat_run_events and company_skills both carry NOT NULL FKs on
+    // company_id → companies.id. Without this check, executing such a run produces a FK
+    // violation deep inside execution setup, surfaced as "heartbeat execution setup failed"
+    // in the log (e.g. when resumeQueuedRuns resurrects wakes for companies that no longer
+    // exist). Fail the run cleanly here — before any FK-sensitive writes — so the error is
+    // actionable and no orphan rows are left in heartbeat_run_events or company_skills.
+    const runCompanyExists = await db
+      .select({ id: companies.id })
+      .from(companies)
+      .where(eq(companies.id, agent.companyId))
+      .then((rows) => rows.length > 0);
+
+    if (!runCompanyExists) {
+      logger.warn(
+        { runId, agentId: agent.id, companyId: agent.companyId },
+        "executeRun: aborting — company no longer exists",
+      );
+      await setRunStatus(runId, "failed", {
+        error: "Company not found",
+        errorCode: "company_not_found",
+        finishedAt: new Date(),
+      });
+      await setWakeupStatus(run.wakeupRequestId, "failed", {
+        finishedAt: new Date(),
+        error: "Company not found",
+      });
+      // releaseIssueExecutionAndPromote has its own company guard and will skip gracefully.
+      const failedRun = await getRun(runId);
+      if (failedRun) await releaseIssueExecutionAndPromote(failedRun);
+      return;
+    }
+
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
     const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);

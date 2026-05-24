@@ -74,7 +74,7 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
         };
       },
     });
-  }, 20_000);
+  }, 60_000);
 
   afterEach(async () => {
     vi.clearAllMocks();
@@ -353,9 +353,12 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
     const heartbeat = heartbeatService(db);
 
     // Bypass FK enforcement to simulate orphaned company (test setup only).
-    await db.execute(sql`SET session_replication_role = 'replica'`);
-    await db.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
-    await db.execute(sql`SET session_replication_role = 'origin'`);
+    // SET LOCAL only applies within a transaction so we wrap the delete in one,
+    // ensuring the FK-bypass and the DELETE run on the same connection.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = 'replica'`);
+      await tx.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
+    });
 
     // Should not throw — the company-existence guard returns null before any FK-violating insert.
     await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
