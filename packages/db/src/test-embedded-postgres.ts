@@ -90,7 +90,13 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     };
   } finally {
     await instance.stop().catch(() => {});
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    // Postgres may still be flushing shutdown files; retry once on ENOTEMPTY.
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
   }
 }
 

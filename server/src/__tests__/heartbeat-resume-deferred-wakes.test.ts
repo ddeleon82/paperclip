@@ -12,7 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agentRuntimeState,
   agents,
@@ -51,18 +51,32 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
+  // Barrier: holds the mock adapter's execute() open during test assertions,
+  // then released in afterEach so executeRun can finish its cleanup writes
+  // (setRunStatus, setWakeupStatus, releaseIssueExecutionAndPromote) before
+  // the TRUNCATE. Without this, two failure modes arise:
+  //
+  // 1. Real adapter: spawns a real Claude Code process that connects to
+  //    PAPERCLIP_API_URL (production) with test credentials that don't exist
+  //    there. The process hangs, preventing the test runner from exiting.
+  //
+  // 2. Instant no-op: executeRun finishes its writes before the test's
+  //    assertion queries return, producing non-deterministic status values
+  //    and breaking the executionRunId invariant check.
+  let releaseExecuteBarrier: (() => void) | null = null;
+  let executeBarrierPromise: Promise<void> = Promise.resolve();
+
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-resume-deferred-");
     db = createDb(tempDb.connectionString);
-    // Register a no-op mock adapter for `claude_local` so that
-    // startNextQueuedRunForAgent / executeRun triggered by the heartbeat service
-    // does NOT spawn a real Claude Code process. Tests only assert DB state;
-    // they do not need (or want) a live process connecting to the production API
-    // with ephemeral test credentials that don't exist in production.
+    // Register a barrier-based mock adapter for `claude_local`. It holds until
+    // afterEach releases it, keeping the in-flight DB state visible to test
+    // assertions and avoiding real process spawning.
     registerServerAdapter({
       type: "claude_local",
       supportsLocalAgentJwt: true,
       async execute() {
+        await executeBarrierPromise;
         return { exitCode: 0, signal: null, timedOut: false };
       },
       async testEnvironment() {
@@ -74,10 +88,21 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
         };
       },
     });
-  }, 60_000);
+  }, 120_000);
+
+  beforeEach(() => {
+    // Reset barrier for each test so the mock holds during assertions.
+    executeBarrierPromise = new Promise<void>((resolve) => {
+      releaseExecuteBarrier = resolve;
+    });
+  });
 
   afterEach(async () => {
     vi.clearAllMocks();
+    // Release any in-flight adapter.execute() so executeRun can complete its
+    // post-execution writes before the table truncation below.
+    releaseExecuteBarrier?.();
+    releaseExecuteBarrier = null;
     // Wait a tick so any fire-and-forget executeRun started by
     // startNextQueuedRunForAgent finishes its async DB writes before TRUNCATE.
     // Otherwise the in-flight inserts race against table cleanup and produce
@@ -353,12 +378,13 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
     const heartbeat = heartbeatService(db);
 
     // Bypass FK enforcement to simulate orphaned company (test setup only).
-    // SET LOCAL only applies within a transaction so we wrap the delete in one,
-    // ensuring the FK-bypass and the DELETE run on the same connection.
-    await db.transaction(async (tx) => {
-      await tx.execute(sql`SET LOCAL session_replication_role = 'replica'`);
-      await tx.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
-    });
+    // Use bare db.execute() calls (same pattern as the resurrectDeferredWakesForAgent
+    // test below) — wrapping in db.transaction() causes SET LOCAL to be processed
+    // through a different code path in postgres.js where the session-level flag does
+    // not propagate to the subsequent DELETE, resulting in a spurious FK error.
+    await db.execute(sql`SET LOCAL session_replication_role = 'replica'`);
+    await db.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
+    await db.execute(sql`SET LOCAL session_replication_role = 'origin'`);
 
     // Should not throw — the company-existence guard returns null before any FK-violating insert.
     await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
@@ -476,5 +502,76 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
       .where(eq(agentWakeupRequests.agentId, deferredAgentId));
     const nonDeferred = allWakes.filter((w) => w.status !== "deferred_issue_execution");
     expect(nonDeferred).toHaveLength(0);
+  });
+
+  it("FRE-947 P0.9: resumeQueuedRuns skips a queued run whose company was deleted after queuing", async () => {
+    // Regression: a heartbeat_run existed in "queued" state for a company that was
+    // subsequently deleted. resumeQueuedRuns → startNextQueuedRunForAgent → executeRun
+    // must detect the missing company and mark the run as "failed" WITHOUT emitting any
+    // FK-violating INSERTs into heartbeat_run_events or company_skills. Before P0.9,
+    // this produced "heartbeat execution setup failed" FK errors in the server log.
+    //
+    // Approach: seed a queued heartbeat_run directly (bypassing promotion), then
+    // delete the company before resumeQueuedRuns fires.
+    const { deferredAgentId, companyId } = await seedScenario({
+      blockerStatus: "succeeded",
+    });
+    const heartbeat = heartbeatService(db);
+
+    // Seed a queued run for the deferred agent directly (simulating a run that was
+    // promoted while the company still existed, then the company was deleted).
+    const preQueuedRunId = randomUUID();
+    const wakeId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: wakeId,
+      companyId,
+      agentId: deferredAgentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_execution_promoted",
+      payload: {},
+      status: "queued",
+      requestedAt: new Date(),
+    });
+    await db.insert(heartbeatRuns).values({
+      id: preQueuedRunId,
+      companyId,
+      agentId: deferredAgentId,
+      wakeupRequestId: wakeId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "queued",
+      contextSnapshot: { wakeReason: "issue_execution_promoted" },
+      updatedAt: new Date(),
+    });
+
+    // Delete the company (bypassing FKs via replica role, test-only).
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = 'replica'`);
+      await tx.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
+    });
+
+    // resumeQueuedRuns must not throw. The P0.9 guard inside executeRun detects the
+    // missing company and marks the run failed cleanly.
+    await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
+
+    // Allow the fire-and-forget executeRun inside startNextQueuedRunForAgent to settle.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    // The run must be marked "failed" with the company_not_found error code.
+    const finalRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, preQueuedRunId))
+      .then((rows) => rows[0] ?? null);
+    expect(finalRun?.status).toBe("failed");
+    expect(finalRun?.errorCode).toBe("company_not_found");
+
+    // No FK-violating heartbeat_run_events rows must exist for this run.
+    const events = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, preQueuedRunId));
+    expect(events).toHaveLength(0);
   });
 });
