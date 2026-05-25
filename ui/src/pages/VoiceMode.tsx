@@ -147,6 +147,16 @@ export function VoiceMode() {
   const { state, dispatch } = useVoiceSessionMachine();
   const tts = useStreamingTts();
 
+  // `useStreamingTts` returns a fresh object every render. Mirror it into a
+  // ref so long-lived effects (notably the WS subscription) can read the
+  // latest `play`/`stop` without listing `tts` in their dep array, which
+  // would otherwise tear down + reconnect the socket on every render that
+  // flips `tts.isPlaying`.
+  const ttsRef = useRef(tts);
+  useEffect(() => {
+    ttsRef.current = tts;
+  }, [tts]);
+
   // Track the active session + current turn IDs so the network code can
   // dispatch the right events back into the machine without races.
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -353,7 +363,7 @@ export function VoiceMode() {
           return;
         }
         const bytes = base64ToBytes(audioBase64);
-        await tts.play(bytes);
+        await ttsRef.current.play(bytes);
         // Heuristic: play() resolves once playback starts. Listen for ended
         // via the isPlaying signal in a separate effect below.
       } catch (err) {
@@ -376,7 +386,7 @@ export function VoiceMode() {
         if (socket.readyState === WebSocket.OPEN) socket.close(1000, "voice_mode_unmount");
       }
     };
-  }, [selectedCompanyId, dispatch, tts]);
+  }, [selectedCompanyId, dispatch]);
 
   // ---- TTS end watcher: when isPlaying flips false during speaking, end turn
   const wasPlayingRef = useRef(false);
