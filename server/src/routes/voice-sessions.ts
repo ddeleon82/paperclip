@@ -7,7 +7,7 @@ import {
   voiceSessionsService,
   logActivity,
 } from "../services/index.js";
-import { badRequest, notFound, unauthorized } from "../errors.js";
+import { badRequest, forbidden, notFound } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { VOICE_SYSTEM_PROMPT } from "../services/voice-prompt.js";
 
@@ -31,10 +31,8 @@ export function voiceSessionsRoutes(db: Db) {
     const { companyId, agentId } = req.body as z.infer<typeof createSessionSchema>;
     assertCompanyAccess(req, companyId);
 
-    if (req.actor.type === "none") {
-      throw unauthorized();
-    }
-    const userId = req.actor.type === "agent" ? req.actor.agentId : req.actor.userId;
+    const actor = getActorInfo(req);
+    const userId = actor.actorId;
     if (!userId) {
       throw badRequest("Actor is missing a user id");
     }
@@ -43,8 +41,8 @@ export function voiceSessionsRoutes(db: Db) {
 
     await logActivity(db, {
       companyId,
-      actorType: req.actor.type === "agent" ? "agent" : "user",
-      actorId: userId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
       action: "voice.session_created",
       entityType: "voice_session",
       entityId: id,
@@ -65,14 +63,8 @@ export function voiceSessionsRoutes(db: Db) {
     }
     assertCompanyAccess(req, session.companyId);
 
-    await sessions.appendTurn(sessionId, {
-      role: "user",
-      text: transcript,
-      ts: new Date().toISOString(),
-    });
-
-    if (req.actor.type === "none") {
-      throw unauthorized();
+    if (req.actor.type === "agent" && req.actor.agentId !== agentId) {
+      throw forbidden("Agent can only invoke itself");
     }
 
     const requestedByActorType = req.actor.type === "agent" ? "agent" : "user";
@@ -88,6 +80,7 @@ export function voiceSessionsRoutes(db: Db) {
       requestedByActorId,
       contextSnapshot: {
         voiceSessionId: sessionId,
+        // Consumed by Task 20 in the agent run prompt construction.
         voiceSystemPromptOverride: VOICE_SYSTEM_PROMPT,
       },
     });
@@ -96,6 +89,12 @@ export function voiceSessionsRoutes(db: Db) {
       res.status(202).json({ status: "skipped" });
       return;
     }
+
+    await sessions.appendTurn(sessionId, {
+      role: "user",
+      text: transcript,
+      ts: new Date().toISOString(),
+    });
 
     const actor = getActorInfo(req);
     await logActivity(db, {

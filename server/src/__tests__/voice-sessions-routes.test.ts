@@ -30,9 +30,9 @@ vi.mock("../services/index.js", () => ({
 
 type ActorOverride = Partial<{
   type: "board" | "agent" | "none";
-  userId: string;
+  userId: string | undefined;
   agentId: string;
-  companyIds: string[];
+  companyIds: string[] | undefined;
   companyId: string;
   source: string;
   isInstanceAdmin: boolean;
@@ -171,6 +171,48 @@ describe("voice sessions routes (FRE-968)", () => {
 
       expect(res.status).toBe(202);
       expect(res.body).toEqual({ status: "skipped" });
+      // wakeup-first ordering: if wakeup skipped, the user turn is NOT persisted.
+      expect(mockVoiceSessionsService.appendTurn).not.toHaveBeenCalled();
+    });
+
+    it("403s when an agent actor tries to invoke a different agent", async () => {
+      mockVoiceSessionsService.getSession.mockResolvedValue(makeSession());
+
+      const res = await request(
+        createApp({
+          type: "agent",
+          agentId: "agent-A",
+          companyId: COMPANY_A,
+          companyIds: undefined,
+          userId: undefined,
+        }),
+      )
+        .post(`/api/voice/session/${SESSION_ID}/turn`)
+        .send({ transcript: "hi", agentId: "agent-B" });
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual(
+        expect.objectContaining({ error: "Agent can only invoke itself" }),
+      );
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+      expect(mockVoiceSessionsService.appendTurn).not.toHaveBeenCalled();
+    });
+
+    it("propagates wakeup errors without persisting the turn", async () => {
+      mockVoiceSessionsService.getSession.mockResolvedValue(makeSession());
+      mockVoiceSessionsService.appendTurn.mockResolvedValue(undefined);
+      // Simulate a paused-agent / budget-block conflict from heartbeat.wakeup.
+      const { conflict } = await import("../errors.js");
+      mockHeartbeatService.wakeup.mockRejectedValue(conflict("Agent is paused"));
+
+      const res = await request(createApp())
+        .post(`/api/voice/session/${SESSION_ID}/turn`)
+        .send({ transcript: "hi", agentId: AGENT_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+      // wakeup-first ordering: error path must NOT persist the turn.
+      expect(mockVoiceSessionsService.appendTurn).not.toHaveBeenCalled();
     });
 
     it("403s when the session belongs to a different company than the actor", async () => {
