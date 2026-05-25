@@ -122,22 +122,38 @@ export function VoiceComposerControls({
 
   const { transcribeAudio } = useVoiceActions();
   const [transcribing, setTranscribing] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Handle blob from spacebar push-to-talk (dispatched by useVoiceMode)
   const handleTranscribeBlob = useCallback(
     async (blob: Blob) => {
       setTranscribing(true);
+      setErrorMsg(null);
       try {
         const { transcript } = await transcribeAudio(blob);
-        if (transcript) onTranscript(transcript);
-      } catch {
-        // silently ignore transcription errors in V1
+        if (transcript) {
+          onTranscript(transcript);
+        } else {
+          setErrorMsg("No speech detected");
+        }
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : "Transcription failed";
+        setErrorMsg(raw.length > 80 ? raw.slice(0, 77) + "..." : raw);
+        // Also log for DevTools debugging
+        console.error("[voice-mode] transcribe failed:", err);
       } finally {
         setTranscribing(false);
       }
     },
     [transcribeAudio, onTranscript],
   );
+
+  // Auto-clear error after 5s so it doesn't get stuck
+  useEffect(() => {
+    if (!errorMsg) return;
+    const t = window.setTimeout(() => setErrorMsg(null), 5000);
+    return () => window.clearTimeout(t);
+  }, [errorMsg]);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -148,9 +164,10 @@ export function VoiceComposerControls({
     return () => window.removeEventListener("voice-mode:transcribe", handler);
   }, [handleTranscribeBlob]);
 
-  // Click-to-toggle recording
+  // Click-to-toggle recording. Mic works regardless of voice-mode toggle:
+  // toggle off = transcript inserted into composer for review
+  // toggle on  = transcript auto-sent
   const handleMicClick = async () => {
-    if (!enabled) return;
     if (transcribing) return;
     if (isSpeaking) {
       stopSpeaking();
@@ -202,7 +219,7 @@ export function VoiceComposerControls({
         type="button"
         aria-label={micLabel}
         onClick={() => void handleMicClick()}
-        disabled={!enabled || transcribing}
+        disabled={transcribing}
         title={micLabel}
         style={{
           display: "flex",
@@ -210,9 +227,9 @@ export function VoiceComposerControls({
           padding: "0.25rem",
           background: "none",
           border: "none",
-          cursor: enabled && !transcribing ? "pointer" : "not-allowed",
+          cursor: transcribing ? "not-allowed" : "pointer",
           color: isRecording ? "red" : transcribing ? "#888" : "inherit",
-          opacity: enabled ? 1 : 0.4,
+          opacity: 1,
         }}
       >
         {transcribing
@@ -221,6 +238,23 @@ export function VoiceComposerControls({
             ? <MicOffIcon size={16} />
             : <MicIcon size={16} />}
       </button>
+
+      {/* Inline error message — auto-clears after 5s. Surfaces transcription
+          failures (e.g. missing ElevenLabs key, network error) instead of
+          silently swallowing them. */}
+      {errorMsg ? (
+        <span
+          role="alert"
+          style={{
+            fontSize: "0.75rem",
+            color: "#dc2626",
+            marginLeft: "0.5rem",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {errorMsg}
+        </span>
+      ) : null}
     </div>
   );
 }

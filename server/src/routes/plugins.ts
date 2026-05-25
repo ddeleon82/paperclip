@@ -116,6 +116,14 @@ const REPO_ROOT = path.resolve(__dirname, "../../..");
 
 const BUNDLED_PLUGIN_EXAMPLES: AvailablePluginExample[] = [
   {
+    packageName: "voice-mode",
+    pluginKey: "voice-mode",
+    displayName: "Voice Mode",
+    description: "Voice input (STT) and output (TTS) for Paperclip issue chat. Requires ELEVENLABS_API_KEY secret.",
+    localPath: "packages/plugins/voice-mode",
+    tag: "example",
+  },
+  {
     packageName: "@paperclipai/plugin-hello-world-example",
     pluginKey: "paperclip.hello-world-example",
     displayName: "Hello World Widget (Example)",

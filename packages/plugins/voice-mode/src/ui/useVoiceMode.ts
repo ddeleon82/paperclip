@@ -1,7 +1,50 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
 
 const LS_KEY = "paperclip:voiceMode:enabled";
 const PUSH_TO_TALK_MIN_MS = 200;
+
+// ---------------------------------------------------------------------------
+// Shared enabled-state external store
+//
+// Multiple components (the slot wrapper + the inner controls) call useVoiceMode().
+// If each kept its own useState, only the instance that calls toggle() would
+// re-render — every other instance would read a stale `enabled` and make wrong
+// decisions (e.g. dispatching transcript-insert instead of auto-send).
+// useSyncExternalStore lets all instances subscribe to one source of truth.
+// ---------------------------------------------------------------------------
+
+const enabledListeners = new Set<() => void>();
+let enabledValue: boolean = (() => {
+  try {
+    return localStorage.getItem(LS_KEY) === "true";
+  } catch {
+    return false;
+  }
+})();
+
+function getEnabledSnapshot(): boolean {
+  return enabledValue;
+}
+
+function subscribeEnabled(cb: () => void): () => void {
+  enabledListeners.add(cb);
+  return () => enabledListeners.delete(cb);
+}
+
+function setEnabledShared(next: boolean): void {
+  if (enabledValue === next) return;
+  enabledValue = next;
+  try {
+    localStorage.setItem(LS_KEY, String(next));
+  } catch {
+    // ignore storage errors
+  }
+  enabledListeners.forEach((cb) => cb());
+}
+
+function toggleEnabledShared(): void {
+  setEnabledShared(!enabledValue);
+}
 
 export interface UseVoiceModeResult {
   enabled: boolean;
@@ -15,13 +58,7 @@ export interface UseVoiceModeResult {
 }
 
 export function useVoiceMode(): UseVoiceModeResult {
-  const [enabled, setEnabled] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(LS_KEY) === "true";
-    } catch {
-      return false;
-    }
-  });
+  const enabled = useSyncExternalStore(subscribeEnabled, getEnabledSnapshot, getEnabledSnapshot);
   const [isRecording, setIsRecording] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
@@ -41,15 +78,7 @@ export function useVoiceMode(): UseVoiceModeResult {
   isSpeakingRef.current = isSpeaking;
 
   const toggle = useCallback(() => {
-    setEnabled((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(LS_KEY, String(next));
-      } catch {
-        // ignore storage errors
-      }
-      return next;
-    });
+    toggleEnabledShared();
   }, []);
 
   const startRecording = useCallback(async (): Promise<void> => {

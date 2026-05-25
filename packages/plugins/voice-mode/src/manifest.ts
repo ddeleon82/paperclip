@@ -23,6 +23,18 @@ const manifest: PaperclipPluginManifestV1 = {
     worker: "./dist/worker.js",
     ui: "./dist/ui"
   },
+  instanceConfigSchema: {
+    type: "object",
+    properties: {
+      elevenlabsKeyRef: {
+        type: "string",
+        format: "secret-ref",
+        title: "ElevenLabs API Key",
+        description: "Bind a company secret (e.g. ELEVENLABS_API_KEY) that holds the ElevenLabs API key. The plugin reads this UUID and resolves the secret value at runtime."
+      }
+    },
+    required: ["elevenlabsKeyRef"]
+  },
   ui: {
     slots: [
       {

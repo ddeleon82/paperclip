@@ -25,6 +25,7 @@ export interface EsbuildLikeOptions {
   sourcemap?: boolean;
   minify?: boolean;
   external?: string[];
+  entryNames?: string;
 }
 
 export interface RollupLikeConfig {
@@ -84,6 +85,10 @@ export function createPluginBundlerPresets(input: PluginBundlerPresetInput = {})
     sourcemap,
     minify,
     external: ["react", "react-dom"],
+    // Force worker bundle name to "worker.js" regardless of source layout
+    // (handles both src/worker.ts and src/worker/index.ts entries).
+    // Mirrors the rollup preset's explicit entryFileNames: "worker.js".
+    entryNames: "worker",
   };
 
   const esbuildManifest: EsbuildLikeOptions = {

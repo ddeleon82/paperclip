@@ -229,11 +229,15 @@ function getShimBlobUrl(specifier: "react" | "react-dom" | "react-dom/client" | 
         const { useState, useEffect, useCallback, useMemo, useRef, useContext,
           createContext, createElement, Fragment, Component, forwardRef,
           memo, lazy, Suspense, StrictMode, cloneElement, Children,
-          isValidElement, createRef } = R;
+          isValidElement, createRef, useSyncExternalStore, useTransition,
+          useDeferredValue, useId, useInsertionEffect, useLayoutEffect,
+          useImperativeHandle, useReducer, useDebugValue, startTransition } = R;
         export { useState, useEffect, useCallback, useMemo, useRef, useContext,
           createContext, createElement, Fragment, Component, forwardRef,
           memo, lazy, Suspense, StrictMode, cloneElement, Children,
-          isValidElement, createRef };
+          isValidElement, createRef, useSyncExternalStore, useTransition,
+          useDeferredValue, useId, useInsertionEffect, useLayoutEffect,
+          useImperativeHandle, useReducer, useDebugValue, startTransition };
       `;
       break;
     case "react/jsx-runtime":

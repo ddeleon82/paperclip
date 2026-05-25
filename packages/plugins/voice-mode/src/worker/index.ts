@@ -3,15 +3,23 @@ import { createElevenLabsClient } from "./elevenlabs.js";
 import { createAudioStore } from "./audio-store.js";
 import { registerRoutes } from "./routes.js";
 
-const ELEVENLABS_SECRET_REF = "ELEVENLABS_API_KEY";
 const SWEEP_MS = 60 * 60 * 1000; // hourly
 
 let sweepTimer: ReturnType<typeof setInterval> | undefined;
 
 const plugin = definePlugin({
   async setup(ctx) {
-    // Resolve ElevenLabs API key from instance secrets
-    const apiKey = await ctx.secrets.resolve(ELEVENLABS_SECRET_REF);
+    // Resolve ElevenLabs API key from instance secrets.
+    // The plugin config field `elevenlabsKeyRef` holds the UUID of a sealed
+    // company secret (typically named ELEVENLABS_API_KEY). Operators bind this
+    // via the plugin Configuration page; see manifest.instanceConfigSchema.
+    const cfg = (await ctx.config.get()) as { elevenlabsKeyRef?: string };
+    if (!cfg.elevenlabsKeyRef) {
+      throw new Error(
+        'voice-mode: elevenlabsKeyRef is not configured. Seal an ELEVENLABS_API_KEY secret on the company and bind it in the plugin Configuration page.',
+      );
+    }
+    const apiKey = await ctx.secrets.resolve(cfg.elevenlabsKeyRef);
 
     // Construct vendor client and audio store
     const client = createElevenLabsClient({ apiKey });
