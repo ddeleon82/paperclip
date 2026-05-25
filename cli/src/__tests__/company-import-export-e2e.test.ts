@@ -163,12 +163,22 @@ function collectTextFiles(root: string, current: string, files: Record<string, s
 
 async function stopServerProcess(child: ServerProcess | null) {
   if (!child || child.exitCode !== null) return;
-  child.kill("SIGTERM");
+  // Kill the entire process group so pnpm's grandchildren (tsx -> node server) are also terminated.
+  // The spawn call uses detached:true to give pnpm its own process group (negative pid = group kill).
+  try {
+    process.kill(-(child.pid as number), "SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
   await new Promise<void>((resolve) => {
     child.once("exit", () => resolve());
     setTimeout(() => {
       if (child.exitCode === null) {
-        child.kill("SIGKILL");
+        try {
+          process.kill(-(child.pid as number), "SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
       }
     }, 5_000);
   });
@@ -258,6 +268,9 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
         cwd: repoRoot,
         env: createServerEnv(configPath, port, tempDb.connectionString),
         stdio: ["ignore", "pipe", "pipe"],
+        // detached:true gives pnpm its own process group so stopServerProcess can kill
+        // the entire group (pnpm → sh → tsx → node server) via process.kill(-child.pid).
+        detached: true,
       },
     );
     serverProcess = child;

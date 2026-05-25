@@ -378,13 +378,13 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
     const heartbeat = heartbeatService(db);
 
     // Bypass FK enforcement to simulate orphaned company (test setup only).
-    // Use bare db.execute() calls (same pattern as the resurrectDeferredWakesForAgent
-    // test below) — wrapping in db.transaction() causes SET LOCAL to be processed
-    // through a different code path in postgres.js where the session-level flag does
-    // not propagate to the subsequent DELETE, resulting in a spurious FK error.
-    await db.execute(sql`SET LOCAL session_replication_role = 'replica'`);
-    await db.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
-    await db.execute(sql`SET LOCAL session_replication_role = 'origin'`);
+    // SET LOCAL only applies within a transaction, so we wrap the delete in one.
+    // This bypasses FK triggers for the duration of the transaction, producing an
+    // orphaned-agent state without cascading to child rows.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = 'replica'`);
+      await tx.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
+    });
 
     // Should not throw — the company-existence guard returns null before any FK-violating insert.
     await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
@@ -546,10 +546,11 @@ describeEmbeddedPostgres("resumeQueuedRuns - deferred wake resurrection (FRE-947
     });
 
     // Delete the company (bypassing FKs via replica role, test-only).
-    await db.transaction(async (tx) => {
-      await tx.execute(sql`SET LOCAL session_replication_role = 'replica'`);
-      await tx.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
-    });
+    // Use bare db.execute() calls — db.transaction() + SET LOCAL does not reliably
+    // propagate the FK-bypass flag to the DELETE in the postgres.js driver.
+    await db.execute(sql`SET LOCAL session_replication_role = 'replica'`);
+    await db.execute(sql`DELETE FROM companies WHERE id = ${companyId}`);
+    await db.execute(sql`SET LOCAL session_replication_role = 'origin'`);
 
     // resumeQueuedRuns must not throw. The P0.9 guard inside executeRun detects the
     // missing company and marks the run failed cleanly.
