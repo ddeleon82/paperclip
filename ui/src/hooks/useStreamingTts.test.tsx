@@ -196,4 +196,77 @@ describe("useStreamingTts (Uint8Array path)", () => {
     expect(audio.pause).toHaveBeenCalled();
     expect(revokeSpy).toHaveBeenCalled();
   });
+
+  it("streams ReadableStream via MediaSource, appends each chunk, ends on close, and stop() halts mid-stream", async () => {
+    interface FakeSourceBuffer {
+      updating: boolean;
+      appendBuffer: ReturnType<typeof vi.fn>;
+      addEventListener: (type: string, listener: () => void) => void;
+      removeEventListener: (type: string, listener: () => void) => void;
+    }
+    const sbListeners: Record<string, Array<() => void>> = {};
+    const sourceBuffer: FakeSourceBuffer = {
+      updating: false,
+      appendBuffer: vi.fn(() => {
+        queueMicrotask(() => (sbListeners["updateend"] ?? []).forEach((l) => l()));
+      }),
+      addEventListener: (type, listener) => {
+        sbListeners[type] = sbListeners[type] ?? [];
+        sbListeners[type].push(listener);
+      },
+      removeEventListener: (type, listener) => {
+        sbListeners[type] = (sbListeners[type] ?? []).filter((l) => l !== listener);
+      },
+    };
+    const msListeners: Record<string, Array<() => void>> = {};
+    const endOfStream = vi.fn();
+    const fakeMediaSource = {
+      readyState: "open" as "open" | "ended" | "closed",
+      addSourceBuffer: vi.fn(() => sourceBuffer),
+      endOfStream,
+      addEventListener: (type: string, listener: () => void) => {
+        msListeners[type] = msListeners[type] ?? [];
+        msListeners[type].push(listener);
+        if (type === "sourceopen") queueMicrotask(() => listener());
+      },
+    };
+    (globalThis as unknown as { MediaSource: unknown }).MediaSource = function () {
+      return fakeMediaSource;
+    };
+
+    const chunks = [new Uint8Array([0xff, 0xfb, 0x90]), new Uint8Array([0x01, 0x02, 0x03]), new Uint8Array([0x04, 0x05])];
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled < chunks.length) {
+          controller.enqueue(chunks[pulled++]!);
+        } else {
+          controller.close();
+        }
+      },
+    });
+
+    const { root, container, handle } = render();
+    await act(async () => {
+      await handle.controls!.play(stream);
+    });
+
+    expect(sourceBuffer.appendBuffer).toHaveBeenCalledTimes(chunks.length);
+    expect(endOfStream).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="state"]')?.textContent).toBe("playing");
+
+    // stop() mid-/post-stream halts cleanly.
+    const appendsBeforeStop = sourceBuffer.appendBuffer.mock.calls.length;
+    fakeMediaSource.readyState = "ended";
+    act(() => {
+      handle.controls!.stop();
+    });
+    expect(sourceBuffer.appendBuffer.mock.calls.length).toBe(appendsBeforeStop);
+    expect(container.querySelector('[data-testid="state"]')?.textContent).toBe("stopped");
+
+    act(() => {
+      root.unmount();
+    });
+    delete (globalThis as unknown as { MediaSource?: unknown }).MediaSource;
+  });
 });
