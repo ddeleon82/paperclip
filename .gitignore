@@ -33,6 +33,9 @@ server/src/**/*.d.ts.map
 tmp/
 feedback-export-*
 
+# VAD runtime assets copied at predev/prebuild via ui/scripts/copy-vad-assets.mjs
+ui/public/vad/
+
 # Editor / tool temp files
 *.tmp
 .vscode/
