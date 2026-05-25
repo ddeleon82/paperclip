@@ -12,6 +12,7 @@ import {
   Boxes,
   Repeat,
   Settings,
+  Mic,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { SidebarSection } from "./SidebarSection";
@@ -103,6 +104,7 @@ export function Sidebar() {
           <SidebarNavItem to="/routines" label="Routines" icon={Repeat} textBadge="Beta" textBadgeTone="amber" />
           <SidebarNavItem to="/status" label="Status" icon={Activity} />
           <SidebarNavItem to="/goals" label="Goals" icon={Target} />
+          <SidebarNavItem to="/voice" label="Voice Mode" icon={Mic} />
         </SidebarSection>
 
         <SidebarProjects />

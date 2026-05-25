@@ -46,6 +46,7 @@ import { BoardClaimPage } from "./pages/BoardClaim";
 import { CliAuthPage } from "./pages/CliAuth";
 import { InviteLandingPage } from "./pages/InviteLanding";
 import { NotFoundPage } from "./pages/NotFound";
+import { VoiceMode } from "./pages/VoiceMode";
 import { queryKeys } from "./lib/queryKeys";
 import { useCompany } from "./context/CompanyContext";
 import { useDialog } from "./context/DialogContext";
@@ -165,6 +166,7 @@ function boardRoutes() {
       <Route path="execution-workspaces/:workspaceId/configuration" element={<ExecutionWorkspaceDetail />} />
       <Route path="execution-workspaces/:workspaceId/issues" element={<ExecutionWorkspaceDetail />} />
       <Route path="status" element={<Status />} />
+      <Route path="voice" element={<VoiceMode />} />
       <Route path="goals" element={<Goals />} />
       <Route path="goals/:goalId" element={<GoalDetail />} />
       <Route path="approvals" element={<Navigate to="/approvals/pending" replace />} />

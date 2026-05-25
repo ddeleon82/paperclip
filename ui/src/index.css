@@ -855,3 +855,20 @@ a.paperclip-project-mention-chip {
 [class*="_toolbarNodeKindSelectContainer_"] {
   z-index: 81 !important;
 }
+
+/* VoiceOrb animations - referenced by ui/src/components/voice/VoiceOrb.tsx. */
+@keyframes voice-orb-pulse-soft {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50% { transform: scale(1.05); opacity: 1; }
+}
+@keyframes voice-orb-pulse-fast {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.1); opacity: 1; }
+}
+@keyframes voice-orb-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.voice-orb-pulse-soft { animation: voice-orb-pulse-soft 1.8s ease-in-out infinite; }
+.voice-orb-pulse-fast { animation: voice-orb-pulse-fast 0.6s ease-in-out infinite; }
+.voice-orb-rotate { animation: voice-orb-rotate 3s linear infinite; }
