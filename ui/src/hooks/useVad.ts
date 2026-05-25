@@ -13,13 +13,15 @@ export function useVad(opts: UseVadOptions) {
   const [state, setState] = useState<VadState>("idle");
   const vadRef = useRef<MicVAD | null>(null);
   const onSpeechEndRef = useRef(opts.onSpeechEnd);
+  // silenceMs is read once on mount; changes after that are ignored. We hold
+  // it in a ref so the init effect doesn't list it as a dep and re-create the
+  // VAD whenever the caller passes a new number.
+  const silenceMsRef = useRef(opts.silenceMs ?? 1200);
 
   // Keep the latest callback without retriggering the init effect.
   useEffect(() => {
     onSpeechEndRef.current = opts.onSpeechEnd;
   }, [opts.onSpeechEnd]);
-
-  const silenceMs = opts.silenceMs ?? 1200;
 
   useEffect(() => {
     if (!opts.enabled) {
@@ -45,7 +47,7 @@ export function useVad(opts: UseVadOptions) {
       },
       positiveSpeechThreshold: 0.5,
       negativeSpeechThreshold: 0.35,
-      redemptionMs: silenceMs,
+      redemptionMs: silenceMsRef.current,
       baseAssetPath: "/vad/",
       onnxWASMBasePath: "/vad/",
     })
@@ -70,7 +72,7 @@ export function useVad(opts: UseVadOptions) {
       vadRef.current?.destroy();
       vadRef.current = null;
     };
-  }, [opts.enabled, silenceMs]);
+  }, [opts.enabled]);
 
   return {
     state,

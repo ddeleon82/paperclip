@@ -197,6 +197,122 @@ describe("useStreamingTts (Uint8Array path)", () => {
     expect(revokeSpy).toHaveBeenCalled();
   });
 
+  it("stop() during an in-flight stream cancels the reader, stops further appends, and does NOT call endOfStream", async () => {
+    interface FakeSourceBuffer {
+      updating: boolean;
+      appendBuffer: ReturnType<typeof vi.fn>;
+      addEventListener: (type: string, listener: () => void) => void;
+      removeEventListener: (type: string, listener: () => void) => void;
+    }
+    const sbListeners: Record<string, Array<() => void>> = {};
+    const sourceBuffer: FakeSourceBuffer = {
+      updating: false,
+      appendBuffer: vi.fn(() => {
+        queueMicrotask(() => (sbListeners["updateend"] ?? []).forEach((l) => l()));
+      }),
+      addEventListener: (type, listener) => {
+        sbListeners[type] = sbListeners[type] ?? [];
+        sbListeners[type].push(listener);
+      },
+      removeEventListener: (type, listener) => {
+        sbListeners[type] = (sbListeners[type] ?? []).filter((l) => l !== listener);
+      },
+    };
+    const msListeners: Record<string, Array<() => void>> = {};
+    const endOfStream = vi.fn();
+    const fakeMediaSource = {
+      readyState: "open" as "open" | "ended" | "closed",
+      addSourceBuffer: vi.fn(() => sourceBuffer),
+      endOfStream,
+      addEventListener: (type: string, listener: () => void) => {
+        msListeners[type] = msListeners[type] ?? [];
+        msListeners[type].push(listener);
+        if (type === "sourceopen") queueMicrotask(() => listener());
+      },
+    };
+    (globalThis as unknown as { MediaSource: unknown }).MediaSource = function () {
+      return fakeMediaSource;
+    };
+    (globalThis as unknown as { MediaSource: { isTypeSupported?: (t: string) => boolean } }).MediaSource.isTypeSupported = () => true;
+
+    // Build a stream that emits one chunk, then blocks on a promise we control,
+    // so the pump is mid-flight when we call stop().
+    let releaseSecondPull: (() => void) | null = null;
+    const blockSecondPull = new Promise<void>((resolve) => {
+      releaseSecondPull = resolve;
+    });
+    let pulled = 0;
+    const cancelSpy = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled === 0) {
+          pulled++;
+          controller.enqueue(new Uint8Array([0xff, 0xfb, 0x90]));
+          return;
+        }
+        // Subsequent pulls hang until released or cancelled.
+        return blockSecondPull;
+      },
+      cancel(reason) {
+        cancelSpy(reason);
+        // Unblock any pending pull so it doesn't leak.
+        releaseSecondPull?.();
+      },
+    });
+
+    const { root, container, handle } = render();
+
+    // Fire play() WITHOUT awaiting completion - the pump must stay alive while
+    // we observe the first append and then stop() it.
+    let playPromise!: Promise<void>;
+    act(() => {
+      playPromise = handle.controls!.play(stream);
+    });
+
+    // Wait for the first appendBuffer to be called.
+    await act(async () => {
+      // Yield a few microtask + macrotask ticks so sourceopen, addSourceBuffer,
+      // and the first reader.read() resolve.
+      for (let i = 0; i < 20; i++) {
+        await Promise.resolve();
+      }
+    });
+    expect(sourceBuffer.appendBuffer).toHaveBeenCalledTimes(1);
+
+    // play() should have resolved once playback started (after first append),
+    // not after stream drain.
+    await act(async () => {
+      await playPromise;
+    });
+
+    const appendsBeforeStop = sourceBuffer.appendBuffer.mock.calls.length;
+    expect(appendsBeforeStop).toBe(1);
+
+    // Now stop mid-stream.
+    act(() => {
+      handle.controls!.stop();
+    });
+
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+
+    // Let any pending microtasks / awaits resolve so we can confirm the pump
+    // is not appending after abort.
+    await act(async () => {
+      for (let i = 0; i < 20; i++) {
+        await Promise.resolve();
+      }
+    });
+
+    expect(sourceBuffer.appendBuffer.mock.calls.length).toBe(appendsBeforeStop);
+    expect(endOfStream).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="state"]')?.textContent).toBe("stopped");
+
+    act(() => {
+      root.unmount();
+    });
+    delete (globalThis as unknown as { MediaSource?: unknown }).MediaSource;
+  });
+
   it("streams ReadableStream via MediaSource, appends each chunk, ends on close, and stop() halts mid-stream", async () => {
     interface FakeSourceBuffer {
       updating: boolean;
@@ -233,6 +349,7 @@ describe("useStreamingTts (Uint8Array path)", () => {
     (globalThis as unknown as { MediaSource: unknown }).MediaSource = function () {
       return fakeMediaSource;
     };
+    (globalThis as unknown as { MediaSource: { isTypeSupported?: (t: string) => boolean } }).MediaSource.isTypeSupported = () => true;
 
     const chunks = [new Uint8Array([0xff, 0xfb, 0x90]), new Uint8Array([0x01, 0x02, 0x03]), new Uint8Array([0x04, 0x05])];
     let pulled = 0;
@@ -249,6 +366,13 @@ describe("useStreamingTts (Uint8Array path)", () => {
     const { root, container, handle } = render();
     await act(async () => {
       await handle.controls!.play(stream);
+    });
+
+    // play() resolves after first append; let the background pump drain.
+    await act(async () => {
+      for (let i = 0; i < 40; i++) {
+        await Promise.resolve();
+      }
     });
 
     expect(sourceBuffer.appendBuffer).toHaveBeenCalledTimes(chunks.length);
