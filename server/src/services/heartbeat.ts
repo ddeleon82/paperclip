@@ -4,7 +4,12 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import type { BillingType, ExecutionWorkspace, ExecutionWorkspaceConfig } from "@paperclipai/shared";
+import type {
+  BillingType,
+  ExecutionWorkspace,
+  ExecutionWorkspaceConfig,
+  HeartbeatInvocationSource,
+} from "@paperclipai/shared";
 import {
   agents,
   agentRuntimeState,
@@ -326,7 +331,10 @@ async function withAgentStartLock<T>(agentId: string, fn: () => Promise<T>) {
 }
 
 interface WakeupOptions {
-  source?: "timer" | "assignment" | "on_demand" | "automation";
+  // Accepts any HeartbeatInvocationSource (see packages/shared constants).
+  // Widened from the legacy four-value union to support new sources like
+  // "voice_session" (FRE-968) without per-call-site casts.
+  source?: HeartbeatInvocationSource;
   triggerDetail?: "manual" | "ping" | "callback" | "system";
   reason?: string | null;
   payload?: Record<string, unknown> | null;
