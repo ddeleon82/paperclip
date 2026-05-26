@@ -70,13 +70,16 @@ export function VoiceComposerControlsSlot(_props: PluginToolbarButtonProps) {
   const { enabled } = useVoiceMode();
 
   function handleTranscript(text: string) {
-    // Two paths based on the voice mode toggle (the speaker icon):
-    // - enabled (on)  -> auto-send the transcript as a comment immediately
-    // - disabled (off) -> insert the transcript into the composer for review
-    // The host (IssueChatComposer + NewIssueDialog) listens for both events
-    // and reacts accordingly.
-    const eventName = enabled ? "voice-mode:auto-send" : "voice-mode:transcript-insert";
-    window.dispatchEvent(new CustomEvent(eventName, { detail: text }));
+    // Always echo into the composer first so the user sees what was heard.
+    window.dispatchEvent(new CustomEvent("voice-mode:transcript-insert", { detail: text }));
+    if (enabled) {
+      // After a brief delay, fire auto-send so the user sees the words land
+      // in the composer before submission. 300ms gives a glance without
+      // feeling laggy.
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("voice-mode:auto-send", { detail: text }));
+      }, 300);
+    }
   }
 
   return <VoiceComposerControls onTranscript={handleTranscript} />;
