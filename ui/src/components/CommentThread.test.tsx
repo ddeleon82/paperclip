@@ -249,6 +249,77 @@ describe("CommentThread", () => {
     });
   });
 
+  it("echoes voice transcripts into the composer before auto-sending", async () => {
+    const root = createRoot(container);
+    const onAdd = vi.fn(async () => {});
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <CommentThread
+            comments={[]}
+            onAdd={onAdd}
+          />
+        </MemoryRouter>,
+      );
+    });
+
+    const editor = container.querySelector('textarea[aria-label="Comment editor"]') as HTMLTextAreaElement | null;
+    expect(editor).not.toBeNull();
+    expect(editor?.value).toBe("");
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent("voice-mode:auto-send", { detail: "hello from voice" }));
+    });
+
+    // Step 1: transcript is in the composer immediately, submit has not fired.
+    const editorAfterEcho = container.querySelector('textarea[aria-label="Comment editor"]') as HTMLTextAreaElement | null;
+    expect(editorAfterEcho?.value).toBe("hello from voice");
+    expect(onAdd).not.toHaveBeenCalled();
+
+    // Step 2: submit fires once after the 300ms delay.
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    expect(onAdd.mock.calls[0]?.[0]).toBe("hello from voice");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("cancels a pending voice auto-send when the comment thread unmounts", () => {
+    const root = createRoot(container);
+    const onAdd = vi.fn(async () => {});
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <CommentThread
+            comments={[]}
+            onAdd={onAdd}
+          />
+        </MemoryRouter>,
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent("voice-mode:auto-send", { detail: "ghost transcript" }));
+    });
+
+    act(() => {
+      root.unmount();
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
   it("uses a larger copy control with feedback and a clipboard fallback", async () => {
     const root = createRoot(container);
 

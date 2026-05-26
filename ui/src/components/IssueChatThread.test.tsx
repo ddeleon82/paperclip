@@ -15,6 +15,10 @@ const { threadMessagesMock } = vi.hoisted(() => ({
   threadMessagesMock: vi.fn(() => <div data-testid="thread-messages" />),
 }));
 
+const { threadAppendMock } = vi.hoisted(() => ({
+  threadAppendMock: vi.fn(async () => {}),
+}));
+
 vi.mock("@assistant-ui/react", () => ({
   AssistantRuntimeProvider: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   ThreadPrimitive: {
@@ -32,7 +36,13 @@ vi.mock("@assistant-ui/react", () => ({
     Content: () => null,
     Parts: () => null,
   },
-  useAui: () => ({ thread: () => ({ append: vi.fn() }) }),
+  // Stable singleton: the host effect depends on `api` and would re-register
+  // (clearing the auto-send timer) on every render if this returned a new
+  // object literal each call.
+  useAui: (() => {
+    const stable = { thread: () => ({ append: threadAppendMock }) };
+    return () => stable;
+  })(),
   useAuiState: () => false,
   useMessage: () => ({
     id: "message",
@@ -128,6 +138,8 @@ describe("IssueChatThread", () => {
     vi.useRealTimers();
     markdownEditorFocusMock.mockReset();
     threadMessagesMock.mockReset();
+    threadAppendMock.mockReset();
+    threadAppendMock.mockImplementation(async () => {});
   });
 
   it("drops the count heading and does not use an internal scrollbox", () => {
@@ -385,6 +397,86 @@ describe("IssueChatThread", () => {
     act(() => {
       root.unmount();
     });
+  });
+
+  it("echoes voice transcripts into the composer before auto-sending", async () => {
+    vi.useFakeTimers();
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <IssueChatThread
+            comments={[]}
+            linkedRuns={[]}
+            timelineEvents={[]}
+            liveRuns={[]}
+            onAdd={async () => {}}
+            enableLiveTranscriptPolling={false}
+          />
+        </MemoryRouter>,
+      );
+    });
+
+    const editor = container.querySelector('textarea[aria-label="Issue chat editor"]') as HTMLTextAreaElement | null;
+    expect(editor).not.toBeNull();
+    expect(editor?.value).toBe("");
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent("voice-mode:auto-send", { detail: "hello world" }));
+    });
+
+    // Step 1: transcript is visible in the composer immediately.
+    const editorAfterEcho = container.querySelector('textarea[aria-label="Issue chat editor"]') as HTMLTextAreaElement | null;
+    expect(editorAfterEcho?.value).toBe("hello world");
+    expect(threadAppendMock).not.toHaveBeenCalled();
+
+    // Step 2: submit fires after the 300ms visual delay.
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+
+    expect(threadAppendMock).toHaveBeenCalledTimes(1);
+    const appendArg = threadAppendMock.mock.calls[0]?.[0] as { content?: Array<{ text?: string }> } | undefined;
+    expect(appendArg?.content?.[0]?.text).toBe("hello world");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("cancels a pending voice auto-send when the composer unmounts", () => {
+    vi.useFakeTimers();
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <IssueChatThread
+            comments={[]}
+            linkedRuns={[]}
+            timelineEvents={[]}
+            liveRuns={[]}
+            onAdd={async () => {}}
+            enableLiveTranscriptPolling={false}
+          />
+        </MemoryRouter>,
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent("voice-mode:auto-send", { detail: "ghost transcript" }));
+    });
+
+    act(() => {
+      root.unmount();
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+
+    expect(threadAppendMock).not.toHaveBeenCalled();
   });
 
   it("folds chain-of-thought when the same message transitions from running to complete", () => {
