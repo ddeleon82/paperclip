@@ -15,7 +15,6 @@ const manifest: PaperclipPluginManifestV1 = {
     "http.outbound",
     "secrets.read-ref",
     "ui.action.register",
-    "ui.commentAnnotation.register",
     "ui.dashboardWidget.register",
     "instance.settings.register",
   ],
@@ -53,20 +52,6 @@ const manifest: PaperclipPluginManifestV1 = {
         id: "voice-composer-controls",
         displayName: "Voice Composer Controls",
         exportName: "VoiceComposerControlsSlot"
-      },
-      {
-        // Per-comment TTS play button.
-        //
-        // NOTE: `chat-message-actions` does NOT exist in core slot types.
-        // Using `commentAnnotation` (renders below each comment in the timeline)
-        // as the interim mount point. Task 11/12 should evaluate whether a
-        // dedicated `chat-message-actions` slot is needed or `commentAnnotation`
-        // is sufficient for the TTS button UX.
-        type: "commentAnnotation",
-        id: "voice-message-speaker",
-        displayName: "Voice Message Speaker",
-        exportName: "MessageSpeakerButton",
-        entityTypes: ["comment"]
       },
       {
         // Plugin settings page — per-agent voice picker.

@@ -630,6 +630,29 @@ function handleLiveEvent(
       ) {
         gatedPushToast(gate, pushToast, "run-status", toast);
       }
+      // FRE-968 Task 19: surface succeeded voice-composer runs so the active
+      // IssueChatThread can auto-play the assistant reply via TTS. We bridge
+      // via a window CustomEvent instead of plumbing a new context so the
+      // listener can live next to the existing voice-mode event handlers.
+      const invocationSource = readString(payload.invocationSource);
+      const status = readString(payload.status);
+      const issueId = readString(payload.issueId);
+      const runId = readString(payload.runId);
+      const agentId = readString(payload.agentId);
+      if (
+        invocationSource === "voice" &&
+        status === "succeeded" &&
+        runId &&
+        issueId &&
+        agentId &&
+        typeof window !== "undefined"
+      ) {
+        window.dispatchEvent(
+          new CustomEvent("voice-mode:run-succeeded", {
+            detail: { runId, issueId, agentId },
+          }),
+        );
+      }
     }
     return;
   }

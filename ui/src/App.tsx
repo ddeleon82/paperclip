@@ -120,6 +120,18 @@ function CloudAccessGate() {
   return <Outlet />;
 }
 
+function VoiceModeGate() {
+  const { data: health } = useQuery({
+    queryKey: queryKeys.health,
+    queryFn: () => healthApi.get(),
+    staleTime: 60_000,
+  });
+  if (health && !health.features?.voiceModeTab) {
+    return <Navigate to="dashboard" replace />;
+  }
+  return <VoiceMode />;
+}
+
 function boardRoutes() {
   return (
     <>
@@ -166,7 +178,7 @@ function boardRoutes() {
       <Route path="execution-workspaces/:workspaceId/configuration" element={<ExecutionWorkspaceDetail />} />
       <Route path="execution-workspaces/:workspaceId/issues" element={<ExecutionWorkspaceDetail />} />
       <Route path="status" element={<Status />} />
-      <Route path="voice" element={<VoiceMode />} />
+      <Route path="voice" element={<VoiceModeGate />} />
       <Route path="goals" element={<Goals />} />
       <Route path="goals/:goalId" element={<GoalDetail />} />
       <Route path="approvals" element={<Navigate to="/approvals/pending" replace />} />

@@ -75,6 +75,7 @@ export interface Config {
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
   companyDeletionEnabled: boolean;
+  voiceModeTabEnabled: boolean;
   telemetryEnabled: boolean;
 }
 
@@ -268,6 +269,7 @@ export function loadConfig(): Config {
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
     companyDeletionEnabled,
+    voiceModeTabEnabled: process.env.VOICE_MODE_TAB_ENABLED === "true",
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
   };
 }

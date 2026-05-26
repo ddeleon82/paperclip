@@ -22,6 +22,7 @@ export type HealthStatus = {
   bootstrapInviteActive?: boolean;
   features?: {
     companyDeletionEnabled?: boolean;
+    voiceModeTab?: boolean;
   };
   devServer?: DevServerHealthStatus;
 };

@@ -64,6 +64,7 @@ import {
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
+import { VOICE_SYSTEM_PROMPT } from "./voice-prompt.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
@@ -1742,6 +1743,11 @@ export function heartbeatService(db: Db) {
       .then((rows) => rows[0] ?? null);
 
     if (updated) {
+      // Surface issueId on the wire so the UI can correlate the run with the
+      // issue page the user is viewing (FRE-968 Task 19: voice auto-play needs
+      // to know which issue's reply comment to read aloud).
+      const issueIdForPayload =
+        readNonEmptyString(parseObject(updated.contextSnapshot).issueId) ?? null;
       publishLiveEvent({
         companyId: updated.companyId,
         type: "heartbeat.run.status",
@@ -1751,6 +1757,7 @@ export function heartbeatService(db: Db) {
           status: updated.status,
           invocationSource: updated.invocationSource,
           triggerDetail: updated.triggerDetail,
+          issueId: issueIdForPayload,
           error: updated.error ?? null,
           errorCode: updated.errorCode ?? null,
           startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
@@ -2295,6 +2302,7 @@ export function heartbeatService(db: Db) {
 
     // Notifications run AFTER the tx commits so subscribers never see a state
     // we end up rolling back. Failures here do not corrupt persisted state.
+    const claimedIssueId = readNonEmptyString(context.issueId) ?? null;
     publishLiveEvent({
       companyId: claimed.companyId,
       type: "heartbeat.run.status",
@@ -2304,6 +2312,7 @@ export function heartbeatService(db: Db) {
         status: claimed.status,
         invocationSource: claimed.invocationSource,
         triggerDetail: claimed.triggerDetail,
+        issueId: claimedIssueId,
         error: claimed.error ?? null,
         errorCode: claimed.errorCode ?? null,
         startedAt: claimed.startedAt ? new Date(claimed.startedAt).toISOString() : null,
@@ -3083,6 +3092,13 @@ export function heartbeatService(db: Db) {
 
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
+    // Task 20: inject voice system prompt for voice/voice_session runs
+    if (
+      (run.invocationSource === "voice" || run.invocationSource === "voice_session") &&
+      !context.voiceSystemPromptOverride
+    ) {
+      context.voiceSystemPromptOverride = VOICE_SYSTEM_PROMPT;
+    }
     const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
     const sessionCodec = getAdapterSessionCodec(agent.adapterType);
     const issueId = readNonEmptyString(context.issueId);
