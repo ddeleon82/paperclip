@@ -377,6 +377,26 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
 
+  // Task 20 (FRE-968): voice system prompt shim — inject before agent instructions so
+  // the conversational rules take priority. Written to a separate file so the combined
+  // instructions path stays unmodified and cache-friendly.
+  const voiceSystemPromptOverride = asString(context.voiceSystemPromptOverride, "").trim();
+  let voiceSystemPromptFile: string | undefined;
+
+  const ensureVoiceSystemPromptFile = async (resumeSessionId: string | null) => {
+    if (resumeSessionId || !voiceSystemPromptOverride || voiceSystemPromptFile !== undefined) {
+      return voiceSystemPromptFile;
+    }
+    try {
+      const filePath = path.join(skillsDir, "voice-system-prompt.md");
+      await fs.writeFile(filePath, voiceSystemPromptOverride, "utf-8");
+      voiceSystemPromptFile = filePath;
+    } catch {
+      voiceSystemPromptFile = undefined;
+    }
+    return voiceSystemPromptFile;
+  };
+
   let effectiveInstructionsFilePath: string | undefined;
   let preparedInstructionsFile = false;
 
@@ -437,6 +457,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const buildClaudeArgs = (
     resumeSessionId: string | null,
     attemptInstructionsFilePath: string | undefined,
+    attemptVoiceSystemPromptFile: string | undefined,
   ) => {
     const args = ["--print", "-", "--output-format", "stream-json", "--verbose"];
     if (resumeSessionId) args.push("--resume", resumeSessionId);
@@ -453,6 +474,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // On resumed sessions the instructions are already in the session cache;
     // re-injecting them via --append-system-prompt-file wastes 5-10K tokens
     // per heartbeat and the Claude CLI may reject the combination outright.
+    // Voice system prompt goes FIRST so its conversational rules aren't buried
+    // under the (much longer) agent instructions.
+    if (attemptVoiceSystemPromptFile && !resumeSessionId) {
+      args.push("--append-system-prompt-file", attemptVoiceSystemPromptFile);
+    }
     if (attemptInstructionsFilePath && !resumeSessionId) {
       args.push("--append-system-prompt-file", attemptInstructionsFilePath);
     }
@@ -478,8 +504,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const runAttempt = async (resumeSessionId: string | null) => {
-    const attemptInstructionsFilePath = await ensureEffectiveInstructionsFilePath(resumeSessionId);
-    const args = buildClaudeArgs(resumeSessionId, attemptInstructionsFilePath);
+    const [attemptInstructionsFilePath, attemptVoiceSystemPromptFile] = await Promise.all([
+      ensureEffectiveInstructionsFilePath(resumeSessionId),
+      ensureVoiceSystemPromptFile(resumeSessionId),
+    ]);
+    const args = buildClaudeArgs(resumeSessionId, attemptInstructionsFilePath, attemptVoiceSystemPromptFile);
     const commandNotes =
       attemptInstructionsFilePath && !resumeSessionId
         ? [
