@@ -14,7 +14,7 @@ import { useStreamingTts } from "@/hooks/useStreamingTts";
 import { useVoiceSessionMachine } from "@/hooks/useVoiceSessionMachine";
 import type { MutablePhase } from "@/hooks/useVoiceSessionMachine";
 
-import { VoiceOrb } from "@/components/voice/VoiceOrb";
+import { VoicePoweredOrb } from "@/components/voice/VoicePoweredOrb";
 import { VoiceScrollback, type VoiceTurn } from "@/components/voice/VoiceScrollback";
 import { VoiceControls } from "@/components/voice/VoiceControls";
 
@@ -466,7 +466,7 @@ export function VoiceMode() {
       <VoiceScrollback turns={turns} />
 
       <div className="flex items-center justify-center py-12">
-        <VoiceOrb phase={orbPhase} />
+        <VoicePoweredOrb phase={orbPhase} className="h-48 w-48" />
       </div>
 
       {state.phase === "error" ? (
