@@ -33,6 +33,7 @@ import type {
 import type { ActiveRunForIssue, LiveRunForIssue } from "../api/heartbeats";
 import { useLiveRunTranscripts } from "./transcript/useLiveRunTranscripts";
 import { usePaperclipIssueRuntime, type PaperclipIssueRuntimeReassignment } from "../hooks/usePaperclipIssueRuntime";
+import { useVoiceComposerAutoPlay } from "../hooks/useVoiceComposerAutoPlay";
 import {
   buildIssueChatMessages,
   formatDurationWords,
@@ -1891,6 +1892,13 @@ export function IssueChatThread({
   const location = useLocation();
   const hasScrolledRef = useRef(false);
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
+  // FRE-968 Task 19: when a heartbeat run started by a voice-tagged comment
+  // succeeds for *this* issue, auto-play the agent's reply via the voice-mode
+  // plugin's TTS action. No-op if the user never used voice for the comment.
+  useVoiceComposerAutoPlay({
+    issueId: issueId ?? null,
+    companyId: companyId ?? null,
+  });
   const displayLiveRuns = useMemo(() => {
     const deduped = new Map<string, LiveRunForIssue>();
     for (const run of liveRuns) {
