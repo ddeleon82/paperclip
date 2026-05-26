@@ -407,6 +407,13 @@
       "when": 1779840100000,
       "tag": "0057_voice_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1779840200000,
+      "tag": "0058_voice_sessions_user_id_text",
+      "breakpoints": true
     }
   ]
 }
