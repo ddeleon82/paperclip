@@ -52,4 +52,22 @@ describe("company routes", () => {
   it("does not double-apply the prefix if already present", () => {
     expect(applyCompanyPrefix("/PAP/company/export", "PAP")).toBe("/PAP/company/export");
   });
+
+  /**
+   * Regression test for FRE-968: Voice Mode tab.
+   *
+   * The Voice Mode sidebar link uses `to="/voice"`. Without `voice` in
+   * BOARD_ROUTE_ROOTS, the router's `applyCompanyPrefix` saw `voice` as an
+   * unknown root segment and treated `VOICE` as the active company prefix —
+   * skipping the prefix injection. The browser then loaded `/voice`, the
+   * route resolver treated `VOICE` as a company prefix lookup, found no
+   * matching company, and crashed with "No company matches prefix 'VOICE'".
+   */
+  it("applies company prefix to /voice", () => {
+    expect(applyCompanyPrefix("/voice", "PAP")).toBe("/PAP/voice");
+  });
+
+  it("does not extract 'voice' as a company prefix", () => {
+    expect(extractCompanyPrefixFromPath("/voice")).toBeNull();
+  });
 });
