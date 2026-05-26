@@ -70,7 +70,12 @@ interface CommentThreadProps {
     vote: FeedbackVoteValue,
     options?: { allowSharing?: boolean; reason?: string },
   ) => Promise<void>;
-  onAdd: (body: string, reopen?: boolean, reassignment?: CommentReassignment) => Promise<void>;
+  onAdd: (
+    body: string,
+    reopen?: boolean,
+    reassignment?: CommentReassignment,
+    options?: { origin?: "voice" },
+  ) => Promise<void>;
   issueStatus?: string;
   agentMap?: Map<string, Agent>;
   currentUserId?: string | null;
@@ -90,6 +95,7 @@ interface CommentThreadProps {
 }
 
 const DRAFT_DEBOUNCE_MS = 800;
+const VOICE_AUTO_SEND_DELAY_MS = 300;
 
 function loadDraft(draftKey: string): string {
   try {
@@ -764,19 +770,44 @@ export function CommentThread({
 
   // Voice mode plugin auto-send: a `voice-mode:auto-send` CustomEvent dispatched
   // anywhere on the page (typically from the voice-mode plugin's mic button)
-  // is treated as a transcribed comment to submit. Single source of truth for
-  // wiring the plugin into the composer without a dedicated chat-composer slot.
-  const handleSubmitRef = useRef<((override?: string) => Promise<void>) | null>(null);
+  // is treated as a transcribed comment to submit. The transcript is echoed
+  // into the composer first so the user can see what the system heard, then
+  // submitted after a short visual delay. The pending timer is cancelled on
+  // unmount so a torn-down thread never submits a stale transcript.
+  const handleSubmitRef = useRef<
+    ((override?: string, origin?: "voice") => Promise<void>) | null
+  >(null);
   handleSubmitRef.current = handleSubmit;
+  const voiceAutoSendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     function onAutoSend(e: Event) {
       const detail = (e as CustomEvent).detail;
       const text = typeof detail === "string" ? detail : detail?.text;
+      const origin =
+        typeof detail === "object" && detail !== null && detail?.origin === "voice"
+          ? ("voice" as const)
+          : undefined;
       if (typeof text !== "string" || !text.trim()) return;
-      void handleSubmitRef.current?.(text);
+      const trimmed = text;
+      // 1. Echo the transcript into the composer so the user sees what was heard.
+      setBody(trimmed);
+      // 2. After a brief visual delay, submit via the override param so any
+      // in-flight setState debounce can't drop the value. Forward `origin` so
+      // the resulting wakeup is tagged invocation_source = "voice".
+      if (voiceAutoSendTimer.current) clearTimeout(voiceAutoSendTimer.current);
+      voiceAutoSendTimer.current = setTimeout(() => {
+        voiceAutoSendTimer.current = null;
+        void handleSubmitRef.current?.(trimmed, origin);
+      }, VOICE_AUTO_SEND_DELAY_MS);
     }
     window.addEventListener("voice-mode:auto-send", onAutoSend);
-    return () => window.removeEventListener("voice-mode:auto-send", onAutoSend);
+    return () => {
+      window.removeEventListener("voice-mode:auto-send", onAutoSend);
+      if (voiceAutoSendTimer.current) {
+        clearTimeout(voiceAutoSendTimer.current);
+        voiceAutoSendTimer.current = null;
+      }
+    };
   }, []);
 
   // Scroll to comment when URL hash matches #comment-{id}
@@ -797,7 +828,7 @@ export function CommentThread({
     }
   }, [location.hash, comments, queuedComments]);
 
-  async function handleSubmit(overrideBody?: string) {
+  async function handleSubmit(overrideBody?: string, origin?: "voice") {
     const source = typeof overrideBody === "string" ? overrideBody : body;
     const trimmed = source.trim();
     if (!trimmed) return;
@@ -808,7 +839,12 @@ export function CommentThread({
     setSubmitting(true);
     setBody("");
     try {
-      await onAdd(submittedBody, reopen ? true : undefined, reassignment ?? undefined);
+      await onAdd(
+        submittedBody,
+        reopen ? true : undefined,
+        reassignment ?? undefined,
+        origin ? { origin } : undefined,
+      );
       if (draftKey) clearDraft(draftKey);
       setReopen(true);
       setReassignTarget(effectiveSuggestedAssigneeValue);

@@ -1323,6 +1323,13 @@ export function issueRoutes(
     if (!(await assertAgentRunCheckoutOwnership(req, res, existing))) return;
 
     const actor = getActorInfo(req);
+    // Voice-mode plugin sends `x-paperclip-origin: voice` for composer-originated
+    // transcript submissions. Used below to tag the resulting comment wakeup with
+    // `source: "voice"` so downstream consumers (Tasks 19/20: auto-play, system
+    // prompt override) can react to voice-originated runs. Any other value is
+    // ignored — only "voice" is recognised.
+    const requestOrigin =
+      req.header("x-paperclip-origin") === "voice" ? "voice" : undefined;
     const isClosed = existing.status === "done" || existing.status === "cancelled";
     const existingRelations =
       Array.isArray(req.body.blockedByIssueIds)
@@ -1760,7 +1767,7 @@ export function issueRoutes(
 
         if (assigneeId && !assigneeChanged && !skipAssigneeCommentWake) {
           addWakeup(assigneeId, {
-            source: "automation",
+            source: requestOrigin ?? "automation",
             triggerDetail: "system",
             reason: reopened ? "issue_reopened_via_comment" : "issue_commented",
             payload: {
@@ -1795,7 +1802,7 @@ export function issueRoutes(
         for (const mentionedId of mentionedIds) {
           if (actor.actorType === "agent" && actor.actorId === mentionedId) continue;
           addWakeup(mentionedId, {
-            source: "automation",
+            source: requestOrigin ?? "automation",
             triggerDetail: "system",
             reason: "issue_comment_mentioned",
             payload: { issueId: id, commentId: comment.id },
@@ -2175,6 +2182,11 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
+    // See PATCH /issues/:id for the voice-origin contract. Tag the resulting
+    // comment-driven wakeups with `source: "voice"` when the request was
+    // dispatched by the voice-mode plugin's composer mic.
+    const requestOrigin =
+      req.header("x-paperclip-origin") === "voice" ? "voice" : undefined;
     const reopenRequested = req.body.reopen === true;
     const interruptRequested = req.body.interrupt === true;
     const isClosed = issue.status === "done" || issue.status === "cancelled";
@@ -2278,7 +2290,7 @@ export function issueRoutes(
       if (assigneeId && (reopened || !skipWake)) {
         if (reopened) {
           wakeups.set(assigneeId, {
-            source: "automation",
+            source: requestOrigin ?? "automation",
             triggerDetail: "system",
             reason: "issue_reopened_via_comment",
             payload: {
@@ -2303,7 +2315,7 @@ export function issueRoutes(
           });
         } else {
           wakeups.set(assigneeId, {
-            source: "automation",
+            source: requestOrigin ?? "automation",
             triggerDetail: "system",
             reason: "issue_commented",
             payload: {
@@ -2338,7 +2350,7 @@ export function issueRoutes(
         if (wakeups.has(mentionedId)) continue;
         if (actorIsAgent && actor.actorId === mentionedId) continue;
         wakeups.set(mentionedId, {
-          source: "automation",
+          source: requestOrigin ?? "automation",
           triggerDetail: "system",
           reason: "issue_comment_mentioned",
           payload: { issueId: id, commentId: comment.id },

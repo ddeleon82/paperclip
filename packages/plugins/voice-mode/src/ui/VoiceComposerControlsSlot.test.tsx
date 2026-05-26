@@ -80,14 +80,16 @@ describe("VoiceComposerControlsSlot — auto-send echo", () => {
       getEvents().some((e) => e.type === "voice-mode:auto-send"),
     ).toBe(false);
 
-    // At 300ms total, auto-send fires with the same text.
+    // At 300ms total, auto-send fires with the same text AND an origin tag so
+    // the host can forward it as the `x-paperclip-origin: voice` request
+    // header for invocation_source tagging (Task 18, FRE-968).
     vi.advanceTimersByTime(1);
     const finalEvents = getEvents();
     const autoSend = finalEvents.find(
       (e) => e.type === "voice-mode:auto-send",
     );
     expect(autoSend).toBeDefined();
-    expect(autoSend!.detail).toBe("hello world");
+    expect(autoSend!.detail).toEqual({ text: "hello world", origin: "voice" });
   });
 
   it("voice mode off: only transcript-insert fires; auto-send never fires", () => {

@@ -9,6 +9,13 @@ export interface PaperclipIssueRuntimeSendOptions {
   body: string;
   reopen?: boolean;
   reassignment?: PaperclipIssueRuntimeReassignment;
+  /**
+   * "voice" when the message was dispatched by the voice-mode plugin's
+   * composer mic. Threaded through to the server's PATCH/POST comment routes
+   * via the `x-paperclip-origin` header so the resulting heartbeat wakeup is
+   * tagged `invocation_source = "voice"` (Tasks 19/20 react to this).
+   */
+  origin?: "voice";
 }
 
 interface UsePaperclipIssueRuntimeOptions {
@@ -61,6 +68,7 @@ export function usePaperclipIssueRuntime({
         body,
         reopen: custom?.reopen === true ? true : undefined,
         reassignment,
+        ...(custom?.origin === "voice" ? { origin: "voice" as const } : {}),
       });
     },
     ...(onCancel ? { onCancel } : {}),

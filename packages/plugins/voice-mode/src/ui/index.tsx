@@ -75,9 +75,18 @@ export function VoiceComposerControlsSlot(_props: PluginToolbarButtonProps) {
     if (enabled) {
       // After a brief delay, fire auto-send so the user sees the words land
       // in the composer before submission. 300ms gives a glance without
-      // feeling laggy.
+      // feeling laggy. The auto-send detail carries `origin: "voice"` so the
+      // host can forward it as the `x-paperclip-origin` request header, which
+      // the server uses to tag the resulting heartbeat wakeup with
+      // `invocation_source = "voice"` (Task 18, FRE-968). Both host listeners
+      // (CommentThread.tsx and IssueChatThread.tsx) tolerate the legacy bare
+      // string payload as well.
       window.setTimeout(() => {
-        window.dispatchEvent(new CustomEvent("voice-mode:auto-send", { detail: text }));
+        window.dispatchEvent(
+          new CustomEvent("voice-mode:auto-send", {
+            detail: { text, origin: "voice" as const },
+          }),
+        );
       }, 300);
     }
   }

@@ -73,8 +73,16 @@ export const issuesApi = {
     api.delete<{ id: string; archivedAt: Date } | { ok: true }>(`/issues/${id}/inbox-archive`),
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Issue>(`/companies/${companyId}/issues`, data),
-  update: (id: string, data: Record<string, unknown>) =>
-    api.patch<IssueUpdateResponse>(`/issues/${id}`, data),
+  update: (
+    id: string,
+    data: Record<string, unknown>,
+    options?: { origin?: "voice" },
+  ) =>
+    api.patch<IssueUpdateResponse>(
+      `/issues/${id}`,
+      data,
+      options?.origin ? { "x-paperclip-origin": options.origin } : undefined,
+    ),
   remove: (id: string) => api.delete<Issue>(`/issues/${id}`),
   checkout: (id: string, agentId: string) =>
     api.post<Issue>(`/issues/${id}/checkout`, {
@@ -117,7 +125,13 @@ export const issuesApi = {
       allowSharing?: boolean;
     },
   ) => api.post<FeedbackVote>(`/issues/${id}/feedback-votes`, data),
-  addComment: (id: string, body: string, reopen?: boolean, interrupt?: boolean) =>
+  addComment: (
+    id: string,
+    body: string,
+    reopen?: boolean,
+    interrupt?: boolean,
+    options?: { origin?: "voice" },
+  ) =>
     api.post<IssueComment>(
       `/issues/${id}/comments`,
       {
@@ -125,6 +139,7 @@ export const issuesApi = {
         ...(reopen === undefined ? {} : { reopen }),
         ...(interrupt === undefined ? {} : { interrupt }),
       },
+      options?.origin ? { "x-paperclip-origin": options.origin } : undefined,
     ),
   listDocuments: (id: string) => api.get<IssueDocument[]>(`/issues/${id}/documents`),
   getDocument: (id: string, key: string) => api.get<IssueDocument>(`/issues/${id}/documents/${encodeURIComponent(key)}`),

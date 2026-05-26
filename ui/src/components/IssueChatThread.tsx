@@ -202,7 +202,12 @@ interface IssueChatThreadProps {
     vote: FeedbackVoteValue,
     options?: { allowSharing?: boolean; reason?: string },
   ) => Promise<void>;
-  onAdd: (body: string, reopen?: boolean, reassignment?: CommentReassignment) => Promise<void>;
+  onAdd: (
+    body: string,
+    reopen?: boolean,
+    reassignment?: CommentReassignment,
+    options?: { origin?: "voice" },
+  ) => Promise<void>;
   onCancelRun?: () => Promise<void>;
   imageUploadHandler?: (file: File) => Promise<string>;
   onAttachImage?: (file: File) => Promise<void>;
@@ -368,6 +373,7 @@ function IssueChatFallbackThread({
 
 const DRAFT_DEBOUNCE_MS = 800;
 const COMPOSER_FOCUS_SCROLL_PADDING_PX = 96;
+const VOICE_AUTO_SEND_DELAY_MS = 300;
 
 function toIsoString(value: string | Date | null | undefined): string | null {
   if (!value) return null;
@@ -1605,7 +1611,11 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
 
   // Voice-mode plugin integration:
   // - `voice-mode:transcript-insert` -> append transcript to composer body for review
-  // - `voice-mode:auto-send` -> submit transcript directly as a comment
+  // - `voice-mode:auto-send` -> echo transcript into composer FIRST so the user
+  //   can see what was heard, then fire the existing submit path after a short
+  //   visual delay. Timer is cancelled on unmount so a torn-down composer never
+  //   submits a stale transcript.
+  const autoSendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     function onInsert(e: Event) {
       const text = (e as CustomEvent<string>).detail;
@@ -1613,28 +1623,50 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
       setBody((prev) => prev ? `${prev} ${text}` : text);
     }
     function onAutoSend(e: Event) {
-      const text = (e as CustomEvent<string>).detail;
+      const detail = (e as CustomEvent).detail;
+      const text = typeof detail === "string" ? detail : detail?.text;
+      const origin =
+        typeof detail === "object" && detail !== null && detail?.origin === "voice"
+          ? ("voice" as const)
+          : undefined;
       if (typeof text !== "string" || !text.trim() || submitting) return;
-      void (async () => {
-        setSubmitting(true);
-        try {
-          await api.thread().append({
-            role: "user",
-            content: [{ type: "text", text: text.trim() }],
-            metadata: { custom: {} },
-            attachments: [],
-            runConfig: { custom: {} },
-          });
-        } finally {
-          setSubmitting(false);
-        }
-      })();
+      const trimmed = text.trim();
+      // 1. Echo the transcript into the composer so the user sees what was heard.
+      setBody(trimmed);
+      // 2. After a brief visual delay, fire the existing append path. Forward
+      // the voice origin through runConfig.custom so usePaperclipIssueRuntime
+      // re-emits it as PaperclipIssueRuntimeSendOptions.origin, which the
+      // IssueChatThread wires to onAdd's options.origin → the api client adds
+      // the `x-paperclip-origin: voice` header on the resulting PATCH/POST.
+      if (autoSendTimer.current) clearTimeout(autoSendTimer.current);
+      autoSendTimer.current = setTimeout(() => {
+        autoSendTimer.current = null;
+        void (async () => {
+          setSubmitting(true);
+          try {
+            await api.thread().append({
+              role: "user",
+              content: [{ type: "text", text: trimmed }],
+              metadata: { custom: {} },
+              attachments: [],
+              runConfig: { custom: origin ? { origin } : {} },
+            });
+            setBody("");
+          } finally {
+            setSubmitting(false);
+          }
+        })();
+      }, VOICE_AUTO_SEND_DELAY_MS);
     }
     window.addEventListener("voice-mode:transcript-insert", onInsert);
     window.addEventListener("voice-mode:auto-send", onAutoSend);
     return () => {
       window.removeEventListener("voice-mode:transcript-insert", onInsert);
       window.removeEventListener("voice-mode:auto-send", onAutoSend);
+      if (autoSendTimer.current) {
+        clearTimeout(autoSendTimer.current);
+        autoSendTimer.current = null;
+      }
     };
   }, [api, submitting]);
 
@@ -1939,7 +1971,8 @@ export function IssueChatThread({
   const runtime = usePaperclipIssueRuntime({
     messages,
     isRunning,
-    onSend: ({ body, reopen, reassignment }) => onAdd(body, reopen, reassignment),
+    onSend: ({ body, reopen, reassignment, origin }) =>
+      onAdd(body, reopen, reassignment, origin ? { origin } : undefined),
     onCancel: onCancelRun,
   });
 

@@ -952,8 +952,13 @@ export function IssueDetail() {
   });
 
   const addComment = useMutation({
-    mutationFn: ({ body, reopen, interrupt }: { body: string; reopen?: boolean; interrupt?: boolean }) =>
-      issuesApi.addComment(issueId!, body, reopen, interrupt),
+    mutationFn: ({
+      body,
+      reopen,
+      interrupt,
+      origin,
+    }: { body: string; reopen?: boolean; interrupt?: boolean; origin?: "voice" }) =>
+      issuesApi.addComment(issueId!, body, reopen, interrupt, origin ? { origin } : undefined),
     onMutate: async ({ body, reopen, interrupt }) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.comments(issueId!) });
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.detail(issueId!) });
@@ -1039,19 +1044,25 @@ export function IssueDetail() {
       reopen,
       interrupt,
       reassignment,
+      origin,
     }: {
       body: string;
       reopen?: boolean;
       interrupt?: boolean;
       reassignment: CommentReassignment;
+      origin?: "voice";
     }) =>
-      issuesApi.update(issueId!, {
-        comment: body,
-        assigneeAgentId: reassignment.assigneeAgentId,
-        assigneeUserId: reassignment.assigneeUserId,
-        ...(reopen ? { status: "todo" } : {}),
-        ...(interrupt ? { interrupt } : {}),
-      }),
+      issuesApi.update(
+        issueId!,
+        {
+          comment: body,
+          assigneeAgentId: reassignment.assigneeAgentId,
+          assigneeUserId: reassignment.assigneeUserId,
+          ...(reopen ? { status: "todo" } : {}),
+          ...(interrupt ? { interrupt } : {}),
+        },
+        origin ? { origin } : undefined,
+      ),
     onMutate: async ({ body, reopen, reassignment, interrupt }) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.comments(issueId!) });
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.detail(issueId!) });
@@ -2191,12 +2202,22 @@ export function IssueDetail() {
                     sharingPreferenceAtSubmit: feedbackDataSharingPreference,
                   });
                 }}
-                onAdd={async (body, reopen, reassignment) => {
+                onAdd={async (body, reopen, reassignment, options) => {
+                  const origin = options?.origin;
                   if (reassignment) {
-                    await addCommentAndReassign.mutateAsync({ body, reopen, reassignment });
+                    await addCommentAndReassign.mutateAsync({
+                      body,
+                      reopen,
+                      reassignment,
+                      ...(origin ? { origin } : {}),
+                    });
                     return;
                   }
-                  await addComment.mutateAsync({ body, reopen });
+                  await addComment.mutateAsync({
+                    body,
+                    reopen,
+                    ...(origin ? { origin } : {}),
+                  });
                 }}
                 imageUploadHandler={async (file) => {
                   const attachment = await uploadAttachment.mutateAsync(file);

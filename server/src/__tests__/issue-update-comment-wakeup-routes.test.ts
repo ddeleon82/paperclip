@@ -32,6 +32,7 @@ vi.mock("../services/index.js", () => ({
   agentService: () => ({
     getById: vi.fn(async () => null),
   }),
+  companyService: () => ({}),
   documentService: () => ({}),
   executionWorkspaceService: () => ({}),
   feedbackService: () => ({
@@ -197,6 +198,76 @@ describe("issue update comment wakeups", () => {
           source: "issue.comment",
         }),
       }),
+    );
+  });
+
+  // FRE-968 Task 18: when the request originated from the voice-mode plugin's
+  // composer mic, the host sends `x-paperclip-origin: voice` and the resulting
+  // comment wakeup must be tagged `source: "voice"` so Tasks 19/20 can react
+  // (auto-play TTS, system-prompt override).
+  it("tags the comment wakeup with source: voice when x-paperclip-origin: voice is set", async () => {
+    const existing = makeIssue({
+      assigneeAgentId: ASSIGNEE_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    const updated = { ...existing };
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockResolvedValue(updated);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-voice-1",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "dictated via mic",
+    });
+
+    const res = await request(createApp())
+      .patch(`/api/issues/${existing.id}`)
+      .set("x-paperclip-origin", "voice")
+      .send({ comment: "dictated via mic" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        source: "voice",
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          issueId: existing.id,
+          commentId: "comment-voice-1",
+          mutation: "comment",
+        }),
+      }),
+    );
+  });
+
+  // Negative case: an unrelated x-paperclip-origin value must not flip the
+  // source. Only the literal "voice" is recognised.
+  it("ignores x-paperclip-origin values other than 'voice'", async () => {
+    const existing = makeIssue({
+      assigneeAgentId: ASSIGNEE_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockResolvedValue({ ...existing });
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-3",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "typed by hand",
+    });
+
+    const res = await request(createApp())
+      .patch(`/api/issues/${existing.id}`)
+      .set("x-paperclip-origin", "keyboard")
+      .send({ comment: "typed by hand" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({ source: "automation", reason: "issue_commented" }),
     );
   });
 });
