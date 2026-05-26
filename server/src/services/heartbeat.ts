@@ -2302,7 +2302,9 @@ export function heartbeatService(db: Db) {
 
     // Notifications run AFTER the tx commits so subscribers never see a state
     // we end up rolling back. Failures here do not corrupt persisted state.
-    const claimedIssueId = readNonEmptyString(context.issueId) ?? null;
+    // Fix A (lazy locking): stamp executionRunId now that the run is actually running,
+    // not at queue time. Guard is idempotent — safe if called more than once.
+    const claimedIssueId = readNonEmptyString(parseObject(claimed.contextSnapshot).issueId) ?? readNonEmptyString(context.issueId) ?? null;
     publishLiveEvent({
       companyId: claimed.companyId,
       type: "heartbeat.run.status",
@@ -2319,10 +2321,6 @@ export function heartbeatService(db: Db) {
         finishedAt: claimed.finishedAt ? new Date(claimed.finishedAt).toISOString() : null,
       },
     });
-
-    // Fix A (lazy locking): stamp executionRunId now that the run is actually running,
-    // not at queue time. Guard is idempotent — safe if called more than once.
-    const claimedIssueId = readNonEmptyString(parseObject(claimed.contextSnapshot).issueId);
     if (claimedIssueId) {
       const claimedAgent = await getAgent(claimed.agentId);
       await db
