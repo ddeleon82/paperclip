@@ -1,14 +1,17 @@
 /**
- * VoicePoweredOrb — WebGL voice-reactive orb (FRE-968).
+ * VoicePoweredOrb — WebGL voice-output orb (FRE-968).
  *
- * Adapted from a community VoicePoweredOrb component shared by Dom. The
- * original captured its own microphone via getUserMedia; we removed that
- * here because the VoiceMode page already runs a VAD on the mic — claiming
- * the mic twice would be wasteful and unnecessary. Instead we drive the
- * orb's `hover` / `rot` uniforms from the session machine `phase`, so the
- * visuals respond to listening / thinking / speaking transitions.
+ * This orb represents the *assistant's voice* (TTS playback), not the user's
+ * microphone. Mic activity / muting is surfaced by the separate mic button in
+ * VoiceControls. When the assistant is speaking and the host passes a
+ * `getLevel` poll function (RMS amplitude tap on the TTS audio element), the
+ * orb's `hover` uniform is driven by real audio amplitude so the visuals
+ * track the waveform of the spoken response. Idle / listening / thinking
+ * states fall back to a calm, low-energy breathing animation — the orb does
+ * not pulse when the user is talking.
  *
- * Shader (snoise3 + draw + mainImage) is copied verbatim from the original.
+ * Shader (snoise3 + draw + mainImage) is unchanged from the original
+ * community reference shared by Dom.
  */
 
 import { useEffect, useRef, type FC } from "react";
@@ -21,25 +24,36 @@ import type { MutablePhase } from "@/hooks/useVoiceSessionMachine";
 type Phase = MutablePhase | "muted" | "error";
 
 interface VoicePoweredOrbProps {
-  /** Voice session machine phase — drives color/intensity. */
+  /** Voice session machine phase — drives base color/rotation. */
   phase: Phase;
   className?: string;
   /** Color hue rotation in degrees. */
   hue?: number;
-  /** Max rotation speed when "active" (listening/thinking/speaking). */
+  /** Max rotation speed when "active" (thinking/speaking). */
   maxRotationSpeed?: number;
   /** Max hover intensity when "active". */
   maxHoverIntensity?: number;
+  /**
+   * Optional polling function returning the current RMS amplitude of the
+   * assistant's TTS playback, in [0, 1]. When provided and `phase` is
+   * "speaking", the orb's hover uniform tracks this value so motion follows
+   * the actual spoken waveform. When omitted or returning 0, the orb falls
+   * back to the static phase target.
+   */
+  getLevel?: () => number;
 }
 
+// Per-phase static targets. The orb is a *voice output* visualization, so
+// "listening" (the user is talking into the mic) intentionally looks like
+// "idle" — mic activity belongs to the mic button, not here.
 const PHASE_TO_TARGETS: Record<
   Phase,
   { hover: number; rotation: number; hueOffset: number }
 > = {
   idle: { hover: 0.0, rotation: 0.15, hueOffset: 0 },
-  listening: { hover: 0.55, rotation: 0.6, hueOffset: 10 },
-  thinking: { hover: 0.35, rotation: 1.1, hueOffset: -20 },
-  speaking: { hover: 0.9, rotation: 0.8, hueOffset: 25 },
+  listening: { hover: 0.0, rotation: 0.15, hueOffset: 0 },
+  thinking: { hover: 0.15, rotation: 0.9, hueOffset: -20 },
+  speaking: { hover: 0.55, rotation: 0.8, hueOffset: 25 },
   muted: { hover: 0.0, rotation: 0.0, hueOffset: -80 },
   error: { hover: 0.0, rotation: 0.0, hueOffset: 150 },
 };
@@ -50,6 +64,7 @@ export const VoicePoweredOrb: FC<VoicePoweredOrbProps> = ({
   hue = 0,
   maxRotationSpeed = 1.2,
   maxHoverIntensity = 0.8,
+  getLevel,
 }) => {
   const ctnDom = useRef<HTMLDivElement>(null);
   // Latest phase, read by the rAF loop without re-running the WebGL init effect.
@@ -57,6 +72,11 @@ export const VoicePoweredOrb: FC<VoicePoweredOrbProps> = ({
   useEffect(() => {
     phaseRef.current = phase;
   }, [phase]);
+  // Latest getLevel poll, read by rAF without re-initializing WebGL.
+  const getLevelRef = useRef<(() => number) | undefined>(getLevel);
+  useEffect(() => {
+    getLevelRef.current = getLevel;
+  }, [getLevel]);
 
   // Vertex shader: pass-through.
   const vert = /* glsl */ `
@@ -303,10 +323,23 @@ export const VoicePoweredOrb: FC<VoicePoweredOrbProps> = ({
         lastTime = t;
         program.uniforms.iTime.value = t * 0.001;
 
-        const targets = PHASE_TO_TARGETS[phaseRef.current] ?? PHASE_TO_TARGETS.idle;
+        const currentPhase = phaseRef.current;
+        const targets = PHASE_TO_TARGETS[currentPhase] ?? PHASE_TO_TARGETS.idle;
+
+        // When the assistant is speaking and the host supplies an amplitude
+        // poll, drive hover from the live waveform so the orb tracks the
+        // spoken response. The phase target acts as a floor so the orb still
+        // breathes between syllables. Outside "speaking", level is ignored.
+        let hoverTarget = targets.hover;
+        if (currentPhase === "speaking" && getLevelRef.current) {
+          const level = Math.max(0, Math.min(1, getLevelRef.current()));
+          // Lift the floor a touch so the orb feels alive even on quiet phrases.
+          hoverTarget = Math.max(0.35, level);
+        }
+
         // Ease toward targets so phase transitions feel organic.
         const smoothing = 1 - Math.exp(-dt * 6);
-        smoothedHover += (targets.hover - smoothedHover) * smoothing;
+        smoothedHover += (hoverTarget - smoothedHover) * smoothing;
         smoothedRotationSpeed +=
           (targets.rotation * maxRotationSpeed - smoothedRotationSpeed) * smoothing;
 

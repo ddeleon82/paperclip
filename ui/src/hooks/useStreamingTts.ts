@@ -4,6 +4,12 @@ export interface StreamingTtsControls {
   play: (audio: Uint8Array | ReadableStream<Uint8Array>) => Promise<void>;
   stop: () => void;
   isPlaying: boolean;
+  /**
+   * Returns the current RMS amplitude of TTS playback, normalized to [0, 1].
+   * In environments without Web Audio (e.g. jsdom) or before playback starts
+   * this returns 0. Safe to call every frame from a rAF loop.
+   */
+  getLevel: () => number;
 }
 
 /**
@@ -23,6 +29,16 @@ export function useStreamingTts(): StreamingTtsControls {
   const activeReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
+  // Web Audio plumbing for getLevel(). Created lazily on first play() in
+  // environments that support it. jsdom / SSR have no AudioContext, so these
+  // remain null and getLevel() returns 0.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  // Explicitly use ArrayBuffer (not ArrayBufferLike) so the buffer matches the
+  // strict Uint8Array<ArrayBuffer> signature getByteTimeDomainData expects.
+  const analyserBufferRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const mediaSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
+
   // Lazy-create the audio element once.
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
@@ -40,6 +56,66 @@ export function useStreamingTts(): StreamingTtsControls {
     }
     return audioRef.current;
   }, []);
+
+  // Lazily attach an AnalyserNode to the audio element so getLevel() can read
+  // real-time RMS amplitude for waveform-driven visualizations. Best-effort:
+  // any failure (no Web Audio support, MediaElementSource already used, etc.)
+  // leaves the analyser refs null and getLevel() returns 0.
+  const ensureAnalyser = useCallback((audio: HTMLAudioElement) => {
+    if (analyserRef.current) return;
+    if (typeof window === "undefined") return;
+    // Some older Safari builds only expose webkitAudioContext.
+    const win = window as unknown as {
+      AudioContext?: typeof AudioContext;
+      webkitAudioContext?: typeof AudioContext;
+    };
+    const AudioCtor = win.AudioContext ?? win.webkitAudioContext ?? null;
+    if (!AudioCtor) return;
+    try {
+      const ctx = audioCtxRef.current ?? new AudioCtor();
+      audioCtxRef.current = ctx;
+      const source =
+        mediaSourceNodeRef.current ?? ctx.createMediaElementSource(audio);
+      mediaSourceNodeRef.current = source;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.3;
+      source.connect(analyser);
+      // Keep audio audible by also routing to the destination.
+      source.connect(ctx.destination);
+      analyserRef.current = analyser;
+      // Allocate over a plain ArrayBuffer so the buffer type matches the strict
+      // Uint8Array<ArrayBuffer> signature of getByteTimeDomainData under TS 5.7.
+      analyserBufferRef.current = new Uint8Array(new ArrayBuffer(analyser.fftSize));
+    } catch (err) {
+      // Most common failure: createMediaElementSource was already called on
+      // this element in a prior session. Non-fatal; level will report 0.
+      // eslint-disable-next-line no-console
+      console.warn("[useStreamingTts] analyser init failed", err);
+    }
+  }, []);
+
+  const getLevel = useCallback((): number => {
+    const analyser = analyserRef.current;
+    const buf = analyserBufferRef.current;
+    if (!analyser || !buf) return 0;
+    if (!isPlaying) return 0;
+    try {
+      analyser.getByteTimeDomainData(buf);
+      // RMS of centered samples (128 == silence midpoint for 8-bit time domain).
+      let sumSq = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = (buf[i] - 128) / 128;
+        sumSq += v * v;
+      }
+      const rms = Math.sqrt(sumSq / buf.length);
+      // RMS for normalized speech rarely exceeds ~0.4; scale to [0, 1] for the
+      // orb's hover uniform and clamp.
+      return Math.max(0, Math.min(1, rms * 2.5));
+    } catch {
+      return 0;
+    }
+  }, [isPlaying]);
 
   const cleanupSources = useCallback(() => {
     if (objectUrlRef.current) {
@@ -90,6 +166,7 @@ export function useStreamingTts(): StreamingTtsControls {
   const playBlob = useCallback(
     async (bytes: Uint8Array): Promise<void> => {
       const audio = getAudio();
+      ensureAnalyser(audio);
       // Tear down any prior source first (synchronously).
       abortActiveStream();
       try {
@@ -109,12 +186,13 @@ export function useStreamingTts(): StreamingTtsControls {
       audio.src = url;
       await audio.play();
     },
-    [abortActiveStream, cleanupSources, getAudio],
+    [abortActiveStream, cleanupSources, ensureAnalyser, getAudio],
   );
 
   const playStream = useCallback(
     async (stream: ReadableStream<Uint8Array>): Promise<void> => {
       const audio = getAudio();
+      ensureAnalyser(audio);
       // Cancel any prior streaming pump before starting a new one.
       abortActiveStream();
       try {
@@ -285,7 +363,7 @@ export function useStreamingTts(): StreamingTtsControls {
       void pump();
       await started;
     },
-    [abortActiveStream, cleanupSources, getAudio, playBlob],
+    [abortActiveStream, cleanupSources, ensureAnalyser, getAudio, playBlob],
   );
 
   const play = useCallback(
@@ -323,8 +401,29 @@ export function useStreamingTts(): StreamingTtsControls {
       }
       cleanupSources();
       audioRef.current = null;
+      // Tear down Web Audio graph.
+      try {
+        mediaSourceNodeRef.current?.disconnect();
+      } catch {
+        // ignore
+      }
+      try {
+        analyserRef.current?.disconnect();
+      } catch {
+        // ignore
+      }
+      mediaSourceNodeRef.current = null;
+      analyserRef.current = null;
+      analyserBufferRef.current = null;
+      const ctx = audioCtxRef.current;
+      if (ctx) {
+        ctx.close().catch(() => {
+          // ignore - context may already be closed.
+        });
+        audioCtxRef.current = null;
+      }
     };
   }, [cleanupSources]);
 
-  return { play, stop, isPlaying };
+  return { play, stop, isPlaying, getLevel };
 }

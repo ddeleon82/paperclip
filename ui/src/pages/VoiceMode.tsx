@@ -466,7 +466,11 @@ export function VoiceMode() {
       <VoiceScrollback turns={turns} />
 
       <div className="flex items-center justify-center py-12">
-        <VoicePoweredOrb phase={orbPhase} className="h-48 w-48" />
+        <VoicePoweredOrb
+          phase={orbPhase}
+          getLevel={tts.getLevel}
+          className="h-48 w-48"
+        />
       </div>
 
       {state.phase === "error" ? (

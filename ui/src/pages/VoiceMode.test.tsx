@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+// React 19.2 dropped `act` from the top-level `react` export under production
+// builds; pull it from react-dom/test-utils so this harness keeps working
+// regardless of NODE_ENV.
+import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -41,6 +44,8 @@ const ttsControls = {
   play: vi.fn().mockResolvedValue(undefined),
   stop: vi.fn(),
   isPlaying: false,
+  // The orb polls getLevel() each frame; in jsdom it always reports silence.
+  getLevel: vi.fn(() => 0),
 };
 vi.mock("@/hooks/useStreamingTts", () => ({
   useStreamingTts: () => ttsControls,
@@ -67,6 +72,24 @@ vi.mock("@/api/plugins", () => ({
   pluginsApi: { bridgePerformAction: vi.fn().mockResolvedValue({ data: {} }) },
 }));
 
+// ---------------------------------------------------------------------------
+// VoicePoweredOrb — stub the WebGL implementation so we can assert what props
+// the page passes through. jsdom can't run the real shader anyway.
+// ---------------------------------------------------------------------------
+const orbPropsLog: Array<Record<string, unknown>> = [];
+vi.mock("@/components/voice/VoicePoweredOrb", () => ({
+  VoicePoweredOrb: (props: Record<string, unknown>) => {
+    orbPropsLog.push(props);
+    return (
+      <div
+        data-testid="voice-orb"
+        data-phase={String(props.phase ?? "")}
+        data-has-level={typeof props.getLevel === "function" ? "yes" : "no"}
+      />
+    );
+  },
+}));
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -85,7 +108,10 @@ describe("VoiceMode page", () => {
     dispatchMock.mockReset();
     ttsControls.play.mockReset();
     ttsControls.stop.mockReset();
+    ttsControls.getLevel.mockReset();
+    ttsControls.getLevel.mockReturnValue(0);
     ttsControls.isPlaying = false;
+    orbPropsLog.length = 0;
 
     fetchMock.mockReset();
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
@@ -128,6 +154,20 @@ describe("VoiceMode page", () => {
       container.querySelector('[data-testid="voice-scrollback-empty"]') ??
         container.querySelector('[data-testid="voice-scrollback"]'),
     ).not.toBeNull();
+  });
+
+  it("passes the TTS getLevel function through to the orb so it can react to voice output", async () => {
+    await act(async () => {
+      root.render(<VoiceMode />);
+    });
+    const orb = container.querySelector<HTMLElement>('[data-testid="voice-orb"]');
+    expect(orb).not.toBeNull();
+    expect(orb!.dataset.hasLevel).toBe("yes");
+    const lastProps = orbPropsLog[orbPropsLog.length - 1];
+    expect(typeof lastProps.getLevel).toBe("function");
+    // Calling the prop should delegate to the TTS hook's getLevel.
+    (lastProps.getLevel as () => number)();
+    expect(ttsControls.getLevel).toHaveBeenCalled();
   });
 
   it("creates a voice session on mount", async () => {

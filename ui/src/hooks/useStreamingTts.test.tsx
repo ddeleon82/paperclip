@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+// React 19.2 removed `act` from the top-level `react` export; it now lives in
+// react-dom/test-utils. Importing from there keeps the existing test harness
+// working without pulling in @testing-library.
+import { act } from "react-dom/test-utils";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -101,6 +104,31 @@ function render(): {
 }
 
 describe("useStreamingTts (Uint8Array path)", () => {
+  it("exposes getLevel() returning 0 when nothing is playing", () => {
+    const { root, handle } = render();
+    expect(handle.controls).not.toBeNull();
+    expect(typeof handle.controls!.getLevel).toBe("function");
+    expect(handle.controls!.getLevel()).toBe(0);
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("getLevel() returns 0 in environments without AudioContext (jsdom)", async () => {
+    const { root, handle } = render();
+    await act(async () => {
+      await handle.controls!.play(new Uint8Array([1, 2, 3]));
+    });
+    // jsdom has no AudioContext - getLevel must gracefully return 0, never throw.
+    expect(() => handle.controls!.getLevel()).not.toThrow();
+    expect(handle.controls!.getLevel()).toBe(0);
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("transitions isPlaying false -> true when play() called", async () => {
     const { root, container, handle } = render();
     expect(handle.controls).not.toBeNull();
