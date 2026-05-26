@@ -251,7 +251,7 @@ describe("CommentThread", () => {
 
   it("echoes voice transcripts into the composer before auto-sending", async () => {
     const root = createRoot(container);
-    const onAdd = vi.fn(async () => {});
+    const onAdd = vi.fn(async (_text: string) => {});
 
     act(() => {
       root.render(
