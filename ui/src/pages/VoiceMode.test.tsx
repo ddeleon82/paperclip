@@ -156,6 +156,17 @@ describe("VoiceMode page", () => {
     ).not.toBeNull();
   });
 
+  it("renders a mic-ready status indicator wired to the session phase", async () => {
+    await act(async () => {
+      root.render(<VoiceMode />);
+    });
+    const status = container.querySelector<HTMLElement>('[data-testid="voice-mode-status"]');
+    expect(status).not.toBeNull();
+    // Hook mock pins state.phase = "listening" so the indicator must reflect that.
+    expect(status!.dataset.phase).toBe("listening");
+    expect(status!.textContent ?? "").toMatch(/listening/i);
+  });
+
   it("passes the TTS getLevel function through to the orb so it can react to voice output", async () => {
     await act(async () => {
       root.render(<VoiceMode />);

@@ -16,7 +16,7 @@ const { threadMessagesMock } = vi.hoisted(() => ({
 }));
 
 const { threadAppendMock } = vi.hoisted(() => ({
-  threadAppendMock: vi.fn(async () => {}),
+  threadAppendMock: vi.fn(async (_arg: unknown) => {}),
 }));
 
 vi.mock("@assistant-ui/react", () => ({
@@ -139,7 +139,7 @@ describe("IssueChatThread", () => {
     markdownEditorFocusMock.mockReset();
     threadMessagesMock.mockReset();
     threadAppendMock.mockReset();
-    threadAppendMock.mockImplementation(async () => {});
+    threadAppendMock.mockImplementation(async (_arg: unknown) => {});
   });
 
   it("drops the count heading and does not use an internal scrollbox", () => {

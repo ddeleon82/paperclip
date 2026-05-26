@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { LiveEvent } from "@paperclipai/shared";
 
 import { useNavigate } from "@/lib/router";
+import { cn } from "@/lib/utils";
 import { useCompany } from "@/context/CompanyContext";
 import { agentsApi } from "@/api/agents";
 import { heartbeatsApi } from "@/api/heartbeats";
@@ -13,6 +14,7 @@ import { useVad } from "@/hooks/useVad";
 import { useStreamingTts } from "@/hooks/useStreamingTts";
 import { useVoiceSessionMachine } from "@/hooks/useVoiceSessionMachine";
 import type { MutablePhase } from "@/hooks/useVoiceSessionMachine";
+import { useVoiceCues } from "@/hooks/useVoiceCues";
 
 import { VoicePoweredOrb } from "@/components/voice/VoicePoweredOrb";
 import { VoiceScrollback, type VoiceTurn } from "@/components/voice/VoiceScrollback";
@@ -146,6 +148,7 @@ export function VoiceMode() {
 
   const { state, dispatch } = useVoiceSessionMachine();
   const tts = useStreamingTts();
+  const cues = useVoiceCues();
 
   // `useStreamingTts` returns a fresh object every render. Mirror it into a
   // ref so long-lived effects (notably the WS subscription) can read the
@@ -252,6 +255,10 @@ export function VoiceMode() {
           ...prev,
           { id: `${localTurnId}-user`, role: "user", text: transcript },
         ]);
+        // Audible confirmation that the user's speech was captured + transcribed.
+        // Fires only after a non-empty transcript so the cue actually corresponds
+        // to received input, not a discarded short utterance.
+        cues.playSpeechReceived();
         dispatch({ type: "USER_SPEECH_END", turnId: localTurnId });
 
         const turnRes = await fetch(
@@ -281,7 +288,7 @@ export function VoiceMode() {
         });
       }
     },
-    [agentId, dispatch, selectedCompanyId, state.phase],
+    [agentId, dispatch, selectedCompanyId, state.phase, cues],
   );
 
   const vad = useVad({
@@ -388,6 +395,19 @@ export function VoiceMode() {
     };
   }, [selectedCompanyId, dispatch]);
 
+  // ---- Mic-open cue: fire a soft tone the first time we enter `listening`
+  // and on every transition back into `listening` (after thinking/speaking/
+  // unmute). Tracks the previous phase in a ref so we play only on the edge,
+  // not every render that sees phase === "listening".
+  const prevPhaseRef = useRef<typeof state.phase | null>(null);
+  useEffect(() => {
+    const prev = prevPhaseRef.current;
+    prevPhaseRef.current = state.phase;
+    if (state.phase === "listening" && prev !== "listening") {
+      cues.playMicOpen();
+    }
+  }, [state.phase, cues]);
+
   // ---- TTS end watcher: when isPlaying flips false during speaking, end turn
   const wasPlayingRef = useRef(false);
   useEffect(() => {
@@ -448,6 +468,7 @@ export function VoiceMode() {
   }, [tts, state.phase, dispatch]);
 
   const orbPhase = machinePhaseToOrb(machinePhase);
+  const statusLabel = phaseToStatusLabel(machinePhase);
 
   return (
     <div
@@ -463,15 +484,41 @@ export function VoiceMode() {
         className="border-b border-border"
       />
 
-      <VoiceScrollback turns={turns} />
-
-      <div className="flex items-center justify-center py-12">
+      {/* Orb takes the bulk of the viewport, vertically + horizontally
+          centered. Larger size + centered position per Dom's request — the
+          orb is the primary surface; transcript and controls are secondary. */}
+      <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4">
         <VoicePoweredOrb
           phase={orbPhase}
           getLevel={tts.getLevel}
-          className="h-48 w-48"
+          className="h-72 w-72 sm:h-80 sm:w-80"
         />
+
+        {/* Mic-ready indicator. Shows a pulsing dot + readable phase label so
+            the user always knows whether the mic is hot. The dot turns muted
+            when muted/error so the colour change reinforces the label. */}
+        <div
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+          data-testid="voice-mode-status"
+          data-phase={machinePhase}
+        >
+          <span
+            aria-hidden="true"
+            className={cn(
+              "inline-block h-2 w-2 rounded-full",
+              machinePhase === "listening" && "animate-pulse bg-emerald-500",
+              machinePhase === "thinking" && "animate-pulse bg-amber-500",
+              machinePhase === "speaking" && "bg-sky-500",
+              machinePhase === "muted" && "bg-muted-foreground/60",
+              machinePhase === "error" && "bg-destructive",
+              machinePhase === "idle" && "bg-muted-foreground/40",
+            )}
+          />
+          <span>{statusLabel}</span>
+        </div>
       </div>
+
+      <VoiceScrollback turns={turns} className="max-h-40 shrink-0 border-t border-border" />
 
       {state.phase === "error" ? (
         <div
@@ -483,6 +530,24 @@ export function VoiceMode() {
       ) : null}
     </div>
   );
+}
+
+function phaseToStatusLabel(phase: "idle" | "listening" | "thinking" | "speaking" | "muted" | "error"): string {
+  switch (phase) {
+    case "listening":
+      return "Listening — speak when ready";
+    case "thinking":
+      return "Thinking…";
+    case "speaking":
+      return "Speaking";
+    case "muted":
+      return "Muted — tap mic to unmute";
+    case "error":
+      return "Error — see message below";
+    case "idle":
+    default:
+      return "Connecting…";
+  }
 }
 
 export default VoiceMode;

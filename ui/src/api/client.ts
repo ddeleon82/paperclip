@@ -19,10 +19,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("Content-Type", "application/json");
   }
 
+  // Order matters: spread `init` BEFORE the merged `headers` so the spread
+  // can't clobber the Headers instance with whatever caller-supplied
+  // shape was on `init.headers`. The merged `headers` already contains the
+  // caller's entries (line 16) plus the auto-added Content-Type.
   const res = await fetch(`${BASE}${path}`, {
-    headers,
     credentials: "include",
     ...init,
+    headers,
   });
   if (!res.ok) {
     const errorBody = await res.json().catch(() => null);
