@@ -33,7 +33,6 @@ import type {
 import type { ActiveRunForIssue, LiveRunForIssue } from "../api/heartbeats";
 import { useLiveRunTranscripts } from "./transcript/useLiveRunTranscripts";
 import { usePaperclipIssueRuntime, type PaperclipIssueRuntimeReassignment } from "../hooks/usePaperclipIssueRuntime";
-import { useVoiceComposerAutoPlay } from "../hooks/useVoiceComposerAutoPlay";
 import {
   buildIssueChatMessages,
   formatDurationWords,
@@ -1892,13 +1891,9 @@ export function IssueChatThread({
   const location = useLocation();
   const hasScrolledRef = useRef(false);
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
-  // FRE-968 Task 19: when a heartbeat run started by a voice-tagged comment
-  // succeeds for *this* issue, auto-play the agent's reply via the voice-mode
-  // plugin's TTS action. No-op if the user never used voice for the comment.
-  useVoiceComposerAutoPlay({
-    issueId: issueId ?? null,
-    companyId: companyId ?? null,
-  });
+  // FRE-1068: TTS auto-play removed from issue pages. Voice responses only
+  // play in the /voice tab now. The composer mic still works for dictation
+  // (transcript inserted into the textarea), but no audio plays back here.
   const displayLiveRuns = useMemo(() => {
     const deduped = new Map<string, LiveRunForIssue>();
     for (const run of liveRuns) {
