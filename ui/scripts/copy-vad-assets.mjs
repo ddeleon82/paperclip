@@ -17,7 +17,7 @@ for (const f of readdirSync(vadSrc).filter((n) => n.endsWith(".onnx") || n.endsW
   copyFileSync(join(vadSrc, f), join(targetDir, f));
   count++;
 }
-for (const f of readdirSync(ortSrc).filter((n) => n.endsWith(".wasm"))) {
+for (const f of readdirSync(ortSrc).filter((n) => n.endsWith(".wasm") || n.endsWith(".mjs"))) {
   copyFileSync(join(ortSrc, f), join(targetDir, f));
   count++;
 }

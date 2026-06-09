@@ -107,32 +107,95 @@ function machinePhaseToOrb(
 // ---------------------------------------------------------------------------
 // Best-effort assistant-message extractor from the run log.
 //
-// The agent run writes JSONL lines to its log. For v1 we take the last
-// non-empty stdout chunk on the run once status flips to "succeeded". This is
-// intentionally lo-fi; a richer adapter-aware path is fine to add later but is
-// out of scope for Task 13. See plan FRE-968.
+// The agent run writes NDJSON lines `{ stream, chunk }` to its log. For
+// claude_local runs the stdout chunks are themselves stream-json events
+// (`--output-format stream-json`), so the last chunk is a `{"type":"result",
+// ...}` envelope — speaking that raw JSON aloud was the FRE-1296 bug. We now
+// parse stream-json and return the `result` text (falling back to the last
+// assistant message text block, then to raw text for non-claude adapters).
 // ---------------------------------------------------------------------------
+
+interface StreamJsonEvent {
+  type?: string;
+  result?: unknown;
+  message?: { content?: Array<{ type?: string; text?: string }> };
+}
+
+/** Extract speakable text from a single claude stream-json line, or null. */
+function extractSpokenText(line: string): string | null {
+  let evt: StreamJsonEvent;
+  try {
+    evt = JSON.parse(line) as StreamJsonEvent;
+  } catch {
+    return null;
+  }
+  if (!evt || typeof evt !== "object") return null;
+  if (evt.type === "result" && typeof evt.result === "string" && evt.result.trim()) {
+    return evt.result.trim();
+  }
+  if (evt.type === "assistant" && Array.isArray(evt.message?.content)) {
+    const text = evt.message.content
+      .filter((b) => b?.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join(" ")
+      .trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+/**
+ * Light markdown strip for TTS. The voice system prompt forbids markdown, but
+ * agents occasionally leak it; reading "asterisk asterisk" aloud is worse than
+ * a lossy strip.
+ */
+function stripMarkdownForSpeech(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\*\*([^*]*)\*\*/g, "$1")
+    .replace(/\*([^*]*)\*/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 async function fetchFinalAssistantText(runId: string): Promise<string> {
   try {
     const { content } = await heartbeatsApi.log(runId, 0, 256_000);
     if (!content) return "";
-    // Pull last non-empty stdout chunk.
     const lines = content.split("\n");
+    let rawFallback = "";
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
       if (!line) continue;
+      let chunk: string | null = null;
       try {
         const parsed = JSON.parse(line) as { stream?: string; chunk?: string };
         if (parsed.stream === "stdout" && parsed.chunk && parsed.chunk.trim()) {
-          return parsed.chunk.trim();
+          chunk = parsed.chunk;
+        } else {
+          continue;
         }
       } catch {
-        // Some agents may write plain text; fall back to the raw last line.
-        return line;
+        // Plain-text log line (non-NDJSON adapters). Keep as a fallback only.
+        if (!rawFallback) rawFallback = line;
+        continue;
+      }
+      // A chunk may contain one or more stream-json lines; walk them backward.
+      const sublines = chunk.split("\n");
+      for (let j = sublines.length - 1; j >= 0; j--) {
+        const sub = sublines[j].trim();
+        if (!sub) continue;
+        const spoken = extractSpokenText(sub);
+        if (spoken) return stripMarkdownForSpeech(spoken);
+        // Non-stream-json stdout (plain-text adapters): remember the first
+        // (i.e. latest) raw text we see as a fallback.
+        if (!rawFallback && !sub.startsWith("{")) rawFallback = sub;
       }
     }
-    return "";
+    return stripMarkdownForSpeech(rawFallback);
   } catch {
     return "";
   }
