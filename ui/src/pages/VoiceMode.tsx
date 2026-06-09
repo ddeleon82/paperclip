@@ -191,8 +191,17 @@ async function fetchFinalAssistantText(runId: string): Promise<string> {
         const spoken = extractSpokenText(sub);
         if (spoken) return stripMarkdownForSpeech(spoken);
         // Non-stream-json stdout (plain-text adapters): remember the first
-        // (i.e. latest) raw text we see as a fallback.
-        if (!rawFallback && !sub.startsWith("{")) rawFallback = sub;
+        // (i.e. latest) raw text we see as a fallback. Gate on whether the
+        // subline parses as JSON (a stream-json event with no speakable text)
+        // rather than on its leading character, so plain-text replies that
+        // happen to start with "{" are not dropped.
+        if (!rawFallback) {
+          try {
+            JSON.parse(sub);
+          } catch {
+            rawFallback = sub;
+          }
+        }
       }
     }
     return stripMarkdownForSpeech(rawFallback);

@@ -310,7 +310,16 @@ export async function createApp(
       const indexHtml = applyUiBranding(indexHtmlRaw);
       verifyUiDistFreshness(uiDist, candidates, indexHtmlRaw);
       app.use(express.static(uiDist));
-      app.get(/.*/, (_req, res) => {
+      // Asset-like paths (file extension in the last segment) that miss the
+      // static handler are genuinely missing files. Serving index.html for
+      // them masks the failure as a 200 text/html response — e.g. FRE-1296,
+      // where ort's missing .mjs loader was swallowed and VAD died silently.
+      const assetExtPattern = /\.(?:js|mjs|cjs|css|map|wasm|onnx|json|png|jpe?g|svg|gif|ico|webp|avif|woff2?|ttf|otf|eot|mp3|mp4|webm|ogg|wav|txt|xml|pdf)$/i;
+      app.get(/.*/, (req, res) => {
+        if (assetExtPattern.test(req.path)) {
+          res.status(404).type("text/plain").end("Not found");
+          return;
+        }
         res.status(200).set("Content-Type", "text/html").end(indexHtml);
       });
     } else {
