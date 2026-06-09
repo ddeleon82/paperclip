@@ -244,8 +244,10 @@ export function VoiceMode() {
   const machinePhase = state.phase;
 
   // ---- Agent selection ---------------------------------------------------
-  // TODO(fre-968): Surface an agent picker. For v1 we pick the first agent
-  // returned for the company. If none, we render an error state.
+  // TODO(fre-968): Surface an agent picker. For v1 we prefer the hub agent
+  // (Conrad) so the voice persona matches the configured TTS voice; the
+  // agents list comes back in arbitrary order, so agents[0] was a different
+  // agent on every session (FRE-1296 field test: turns ran on Cortex/Hunter).
   const { data: agents } = useQuery({
     queryKey: selectedCompanyId
       ? queryKeys.agents.list(selectedCompanyId)
@@ -253,7 +255,10 @@ export function VoiceMode() {
     queryFn: () => agentsApi.list(selectedCompanyId as string),
     enabled: !!selectedCompanyId,
   });
-  const agentId = agents?.[0]?.id ?? null;
+  const agentId =
+    agents?.find((a) => a.name?.trim().toLowerCase() === "conrad")?.id ??
+    agents?.[0]?.id ??
+    null;
 
   // ---- Session lifecycle (create on mount, end on unmount) ---------------
   useEffect(() => {
@@ -304,7 +309,13 @@ export function VoiceMode() {
     async (audio: Float32Array) => {
       const activeSession = sessionIdRef.current;
       if (!activeSession || !agentId) return;
-      if (state.phase === "muted") return;
+      // Only accept speech while listening. Without this gate, a background
+      // noise blip during "thinking" replaced turnIdRef/runIdRef, so the
+      // in-flight run's "succeeded" event no longer matched and the reply was
+      // silently dropped (FRE-1296: 5 turns spawned in one minute, none
+      // spoken). Barge-in during "speaking" dispatches BARGE_IN first, which
+      // returns the machine to "listening" before speech-end fires.
+      if (state.phase !== "listening") return;
 
       // Optimistically assign a turn id locally; the server's runId comes back
       // afterwards and we attach it via runIdRef.
@@ -322,6 +333,9 @@ export function VoiceMode() {
         )) as { data: { transcript: string; audioId: string } };
         const transcript = transcribeRes.data?.transcript?.trim();
         if (!transcript) return;
+        // STT on a noise blip yields short filler ("you", "uh") - don't burn
+        // a full agent run on it.
+        if (transcript.length < 3) return;
 
         setTurns((prev) => [
           ...prev,

@@ -65,6 +65,14 @@ describe("voice session reducer", () => {
     expect(next).toEqual({ phase: "listening" });
   });
 
+  it("thinking + BARGE_IN -> listening (abandoned turn, e.g. deduped wakeup)", () => {
+    const next = reducer(
+      { phase: "thinking", turnId: "t1" },
+      { type: "BARGE_IN" },
+    );
+    expect(next).toEqual({ phase: "listening" });
+  });
+
   it("speaking + ERROR -> error", () => {
     const next = reducer(
       { phase: "speaking", turnId: "t1" },

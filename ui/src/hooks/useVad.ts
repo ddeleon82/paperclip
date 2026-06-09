@@ -45,8 +45,13 @@ export function useVad(opts: UseVadOptions) {
         if (cancelled) return;
         setState("listening");
       },
-      positiveSpeechThreshold: 0.5,
-      negativeSpeechThreshold: 0.35,
+      // Tuned up from the library defaults (0.5/0.35) after FRE-1296 field
+      // testing: phone mics in a normal room kept tripping the VAD on
+      // background noise, spawning a turn (and a full agent run) every few
+      // seconds. minSpeechMs discards blips shorter than half a second.
+      positiveSpeechThreshold: 0.7,
+      negativeSpeechThreshold: 0.55,
+      minSpeechMs: 500,
       redemptionMs: silenceMsRef.current,
       baseAssetPath: "/vad/",
       onnxWASMBasePath: "/vad/",

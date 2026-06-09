@@ -87,7 +87,13 @@ export function reducer(
       return state;
     }
     case "BARGE_IN": {
-      if (state.phase === "speaking") return { phase: "listening" };
+      // From "speaking": user interrupted playback. From "thinking": the turn
+      // was abandoned client-side (e.g. the server deduped the wakeup), so
+      // return to listening instead of waiting forever - BARGE_IN as a no-op
+      // here left the machine stuck in "thinking" (FRE-1296).
+      if (state.phase === "speaking" || state.phase === "thinking") {
+        return { phase: "listening" };
+      }
       return state;
     }
     case "ERROR": {
