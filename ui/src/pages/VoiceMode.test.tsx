@@ -46,6 +46,8 @@ const ttsControls = {
   isPlaying: false,
   // The orb polls getLevel() each frame; in jsdom it always reports silence.
   getLevel: vi.fn(() => 0),
+  // Resolves immediately in tests; real impl awaits clip ended/pause event.
+  waitUntilDone: vi.fn().mockResolvedValue(undefined),
 };
 vi.mock("@/hooks/useStreamingTts", () => ({
   useStreamingTts: () => ttsControls,

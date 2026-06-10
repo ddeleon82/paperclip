@@ -10,6 +10,14 @@ export interface StreamingTtsControls {
    * this returns 0. Safe to call every frame from a rAF loop.
    */
   getLevel: () => number;
+  /**
+   * Resolves when the currently-playing clip finishes (ended/pause event) or
+   * immediately if nothing is playing. Used by the sentence TTS queue so it
+   * can await full clip completion before advancing to the next sentence;
+   * this prevents playBlob() from calling audio.pause() on a still-audible
+   * clip when the queue pump is ready for the next item.
+   */
+  waitUntilDone: () => Promise<void>;
 }
 
 /**
@@ -28,6 +36,9 @@ export function useStreamingTts(): StreamingTtsControls {
   const abortRef = useRef<{ aborted: boolean }>({ aborted: false });
   const activeReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  // Resolvers queued by waitUntilDone(). Flushed when the audio element fires
+  // pause or ended (i.e. the clip is fully complete or intentionally stopped).
+  const doneResolversRef = useRef<Array<() => void>>([]);
 
   // Web Audio plumbing for getLevel(). Created lazily on first play() in
   // environments that support it. jsdom / SSR have no AudioContext, so these
@@ -39,23 +50,38 @@ export function useStreamingTts(): StreamingTtsControls {
   const analyserBufferRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const mediaSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
 
+  // Flush all waitUntilDone() resolvers. Called whenever playback ends so that
+  // the sentence queue pump can advance only after a clip is fully audible.
+  const flushDoneResolvers = useCallback(() => {
+    const resolvers = doneResolversRef.current;
+    doneResolversRef.current = [];
+    for (const resolve of resolvers) resolve();
+  }, []);
+
   // Lazy-create the audio element once.
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
       const audio = new Audio();
       audio.addEventListener("play", () => setIsPlaying(true));
       audio.addEventListener("playing", () => setIsPlaying(true));
-      audio.addEventListener("pause", () => setIsPlaying(false));
-      audio.addEventListener("ended", () => setIsPlaying(false));
+      audio.addEventListener("pause", () => {
+        setIsPlaying(false);
+        flushDoneResolvers();
+      });
+      audio.addEventListener("ended", () => {
+        setIsPlaying(false);
+        flushDoneResolvers();
+      });
       audio.addEventListener("error", () => {
         // eslint-disable-next-line no-console
         console.error("[useStreamingTts] audio element error", audio.error);
         setIsPlaying(false);
+        flushDoneResolvers();
       });
       audioRef.current = audio;
     }
     return audioRef.current;
-  }, []);
+  }, [flushDoneResolvers]);
 
   // Lazily attach an AnalyserNode to the audio element so getLevel() can read
   // real-time RMS amplitude for waveform-driven visualizations. Best-effort:
@@ -425,5 +451,15 @@ export function useStreamingTts(): StreamingTtsControls {
     };
   }, [cleanupSources]);
 
-  return { play, stop, isPlaying, getLevel };
+  const waitUntilDone = useCallback((): Promise<void> => {
+    // If nothing is playing, resolve immediately.
+    if (!audioRef.current || audioRef.current.paused) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      doneResolversRef.current.push(resolve);
+    });
+  }, []);
+
+  return { play, stop, isPlaying, getLevel, waitUntilDone };
 }

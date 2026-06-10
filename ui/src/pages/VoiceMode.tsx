@@ -435,12 +435,20 @@ export function VoiceMode() {
                   const bytes = base64ToBytes(b64);
                   return new Blob([bytes.buffer as ArrayBuffer], { type: mime });
                 }),
-            // play: adapt Blob for useStreamingTts.play()
+            // play: adapt Blob for useStreamingTts.play() and await full
+            // clip completion before returning. play() resolves when audio
+            // STARTS (not ends); without waitUntilDone(), the queue pump
+            // advances to the next sentence immediately and playBlob() calls
+            // audio.pause() mid-clip, cutting off the current sentence.
             async (blob: Blob) => {
               const arr = new Uint8Array(await blob.arrayBuffer());
               // Pause the ack clip before real answer audio starts.
               ackAudioRef.current?.pause();
               await ttsRef.current.play(arr);
+              // Wait for the audio element to fire ended/pause before the
+              // queue advances - prevents sentence N from being cut off by
+              // sentence N+1's playBlob() calling audio.pause().
+              await ttsRef.current.waitUntilDone();
             },
             // onIdle: all sentences played - transition speaking -> listening
             () => {
@@ -635,12 +643,21 @@ export function VoiceMode() {
     }
   }, [state.phase, cues]);
 
-  // ---- TTS end watcher: when isPlaying flips false during speaking, end turn
+  // ---- TTS end watcher: when isPlaying flips false during speaking, end turn.
+  // Streamed turns (sentencesEnqueuedRef.current > 0) are ended exclusively by
+  // the sentence queue's onIdle callback. isPlaying flickers false between every
+  // pair of sentences in the streamed path (playBlob pauses before starting the
+  // next clip), so it cannot signal end-of-answer there - only onIdle can.
   const wasPlayingRef = useRef(false);
   useEffect(() => {
     const wasPlaying = wasPlayingRef.current;
     wasPlayingRef.current = tts.isPlaying;
-    if (wasPlaying && !tts.isPlaying && state.phase === "speaking") {
+    if (
+      wasPlaying &&
+      !tts.isPlaying &&
+      state.phase === "speaking" &&
+      sentencesEnqueuedRef.current === 0
+    ) {
       dispatch({ type: "TTS_END", turnId: state.turnId });
     }
   }, [tts.isPlaying, state, dispatch]);
