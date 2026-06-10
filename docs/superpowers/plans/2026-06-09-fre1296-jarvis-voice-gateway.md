@@ -50,7 +50,7 @@ Recommendation: **Option B**. Kenn is a deliberate identity choice (CLAUDE.md-le
 
 ### Decision 2 (resolved, flagging): Gemini access path
 
-NVIDIA Build hosts the NIM catalog (open models). It does NOT carry the Gemini Live API. Phase 2 needs a **Google AI Studio API key** from the F&C Google account (free tier covers development; Live API billing applies at production volume). This is a 5-minute signup, not a blocker, but it is the Google-account path, not the NVIDIA one.
+NVIDIA Build hosts the NIM catalog (open models). It does NOT carry the Gemini Live API. The Google-account path is the right one, and it is ALREADY UNBLOCKED: a "Gemini API Key" item exists in 1Password (Clawd Vault) and was verified live on 2026-06-10 against the generativelanguage.googleapis.com models endpoint; it can see `gemini-3.1-flash-live-preview` and the `gemini-2.5-flash-native-audio-*` line. Phase 2 seals this key into the plugin config the same way as ELEVENLABS (`elevenlabsKeyRef` pattern). Live API billing applies at production volume.
 
 ### Phase map
 
