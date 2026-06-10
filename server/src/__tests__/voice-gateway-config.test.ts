@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildVoiceGatewayConfig,
   isVoiceGatewayEnabled,
+  voiceGatewayDisabledReason,
   type VoiceGatewayConfig,
 } from "../voice-gateway-config.js";
 
@@ -229,5 +230,43 @@ describe("isVoiceGatewayEnabled", () => {
   it("disabled when output is native but geminiApiKey is null", () => {
     const cfg = build({ VOICE_GATEWAY_OUTPUT: "native" });
     expect(isVoiceGatewayEnabled(cfg)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// voiceGatewayDisabledReason
+// ---------------------------------------------------------------------------
+
+describe("voiceGatewayDisabledReason", () => {
+  it("returns null when gateway is fully enabled (cascade + both keys)", () => {
+    const cfg = build({
+      GEMINI_API_KEY: "gemini-key",
+      ELEVENLABS_API_KEY: "el-key",
+    });
+    expect(voiceGatewayDisabledReason(cfg)).toBeNull();
+  });
+
+  it("returns a reason when geminiApiKey is missing", () => {
+    const cfg = build({ ELEVENLABS_API_KEY: "el-key" });
+    const reason = voiceGatewayDisabledReason(cfg);
+    expect(reason).not.toBeNull();
+    expect(typeof reason).toBe("string");
+    expect((reason as string).length).toBeGreaterThan(0);
+  });
+
+  it("returns a reason when cascade output but elevenlabsApiKey is missing", () => {
+    const cfg = build({ GEMINI_API_KEY: "gemini-key" });
+    expect(cfg.output).toBe("cascade");
+    const reason = voiceGatewayDisabledReason(cfg);
+    expect(reason).not.toBeNull();
+    expect(typeof reason).toBe("string");
+  });
+
+  it("returns null when native output with only geminiApiKey present", () => {
+    const cfg = build({
+      GEMINI_API_KEY: "gemini-key",
+      VOICE_GATEWAY_OUTPUT: "native",
+    });
+    expect(voiceGatewayDisabledReason(cfg)).toBeNull();
   });
 });

@@ -22,7 +22,12 @@ import {
   resolveDefaultSecretsKeyFilePath,
   resolveDefaultStorageDir,
   resolveHomeAwarePath,
+  resolvePaperclipInstanceRoot,
 } from "./home-paths.js";
+import {
+  buildVoiceGatewayConfig,
+  type VoiceGatewayConfig,
+} from "./voice-gateway-config.js";
 
 const PAPERCLIP_ENV_FILE_PATH = resolvePaperclipEnvPath();
 if (existsSync(PAPERCLIP_ENV_FILE_PATH)) {
@@ -76,6 +81,7 @@ export interface Config {
   heartbeatSchedulerIntervalMs: number;
   companyDeletionEnabled: boolean;
   voiceModeTabEnabled: boolean;
+  voiceGateway: VoiceGatewayConfig;
   telemetryEnabled: boolean;
 }
 
@@ -270,6 +276,10 @@ export function loadConfig(): Config {
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
     companyDeletionEnabled,
     voiceModeTabEnabled: process.env.VOICE_MODE_TAB_ENABLED === "true",
+    voiceGateway: buildVoiceGatewayConfig(
+      process.env as Record<string, string | undefined>,
+      resolve(resolvePaperclipInstanceRoot(), "data"),
+    ),
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
   };
 }

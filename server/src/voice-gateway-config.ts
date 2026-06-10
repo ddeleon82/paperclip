@@ -88,3 +88,21 @@ export function isVoiceGatewayEnabled(cfg: VoiceGatewayConfig): boolean {
   if (cfg.output === "cascade" && cfg.elevenlabsApiKey === null) return false;
   return true;
 }
+
+/**
+ * Returns a human-readable reason string when the gateway is disabled,
+ * or null when it is enabled. Pure function - no side effects.
+ *
+ * Reasons:
+ *   - no Gemini API key (VOICE_GATEWAY_GEMINI_API_KEY or GEMINI_API_KEY required)
+ *   - cascade output requires ElevenLabs key (VOICE_GATEWAY_ELEVENLABS_API_KEY or ELEVENLABS_API_KEY)
+ */
+export function voiceGatewayDisabledReason(cfg: VoiceGatewayConfig): string | null {
+  if (cfg.geminiApiKey === null) {
+    return "no Gemini API key (set VOICE_GATEWAY_GEMINI_API_KEY or GEMINI_API_KEY)";
+  }
+  if (cfg.output === "cascade" && cfg.elevenlabsApiKey === null) {
+    return "cascade output requires an ElevenLabs key (set VOICE_GATEWAY_ELEVENLABS_API_KEY or ELEVENLABS_API_KEY)";
+  }
+  return null;
+}
