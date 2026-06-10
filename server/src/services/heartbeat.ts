@@ -902,6 +902,17 @@ async function buildPaperclipWakePayload(input: {
 }) {
   const executionStage = parseObject(input.contextSnapshot.executionStage);
   const commentIds = extractWakeCommentIds(input.contextSnapshot);
+  // FRE-1296: voice turns carry the user's transcript in contextSnapshot.voiceTurn.
+  // Without this, voice wakeups produce a null payload and the agent runs a
+  // generic prompt without ever seeing what the user said.
+  const voiceTurnRaw = parseObject(input.contextSnapshot.voiceTurn);
+  const voiceTranscript = readNonEmptyString(voiceTurnRaw.transcript);
+  const voiceTurn = voiceTranscript
+    ? {
+        transcript: voiceTranscript,
+        instructions: readNonEmptyString(voiceTurnRaw.instructions),
+      }
+    : null;
   const issueId = readNonEmptyString(input.contextSnapshot.issueId);
   const issueSummary =
     input.issueSummary ??
@@ -918,7 +929,7 @@ async function buildPaperclipWakePayload(input: {
           .where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)))
           .then((rows) => rows[0] ?? null)
       : null);
-  if (commentIds.length === 0 && Object.keys(executionStage).length === 0 && !issueSummary) return null;
+  if (commentIds.length === 0 && Object.keys(executionStage).length === 0 && !issueSummary && !voiceTurn) return null;
 
   const commentRows =
     commentIds.length === 0
@@ -996,6 +1007,7 @@ async function buildPaperclipWakePayload(input: {
         }
       : null,
     executionStage: Object.keys(executionStage).length > 0 ? executionStage : null,
+    voiceTurn,
     commentIds,
     latestCommentId: commentIds[commentIds.length - 1] ?? null,
     comments,

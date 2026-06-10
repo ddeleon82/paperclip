@@ -227,10 +227,16 @@ type PaperclipWakeComment = {
   authorId: string | null;
 };
 
+type PaperclipWakeVoiceTurn = {
+  transcript: string;
+  instructions: string | null;
+};
+
 type PaperclipWakePayload = {
   reason: string | null;
   issue: PaperclipWakeIssue | null;
   executionStage: PaperclipWakeExecutionStage | null;
+  voiceTurn: PaperclipWakeVoiceTurn | null;
   commentIds: string[];
   latestCommentId: string | null;
   comments: PaperclipWakeComment[];
@@ -318,6 +324,16 @@ function normalizePaperclipWakeExecutionStage(value: unknown): PaperclipWakeExec
   };
 }
 
+function normalizePaperclipWakeVoiceTurn(value: unknown): PaperclipWakeVoiceTurn | null {
+  const voiceTurn = parseObject(value);
+  const transcript = asString(voiceTurn.transcript, "").trim();
+  if (!transcript) return null;
+  return {
+    transcript,
+    instructions: asString(voiceTurn.instructions, "").trim() || null,
+  };
+}
+
 export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayload | null {
   const payload = parseObject(value);
   const comments = Array.isArray(payload.comments)
@@ -332,8 +348,9 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
         .map((entry) => entry.trim())
     : [];
   const executionStage = normalizePaperclipWakeExecutionStage(payload.executionStage);
+  const voiceTurn = normalizePaperclipWakeVoiceTurn(payload.voiceTurn);
 
-  if (comments.length === 0 && commentIds.length === 0 && !executionStage && !normalizePaperclipWakeIssue(payload.issue)) {
+  if (comments.length === 0 && commentIds.length === 0 && !executionStage && !voiceTurn && !normalizePaperclipWakeIssue(payload.issue)) {
     return null;
   }
 
@@ -341,6 +358,7 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
     reason: asString(payload.reason, "").trim() || null,
     issue: normalizePaperclipWakeIssue(payload.issue),
     executionStage,
+    voiceTurn,
     commentIds,
     latestCommentId: asString(payload.latestCommentId, "").trim() || null,
     comments,
@@ -364,6 +382,26 @@ export function renderPaperclipWakePrompt(
 ): string {
   const normalized = normalizePaperclipWakePayload(value);
   if (!normalized) return "";
+
+  if (normalized.voiceTurn) {
+    // Voice turns are conversational, not issue-scoped: render a dedicated
+    // prompt (same shape for fresh and resumed sessions) instead of the
+    // issue-wake boilerplate so the agent answers the spoken words directly.
+    const voiceLines = [
+      "## Voice Turn",
+      "",
+      "The user is speaking to you over a live voice channel. Their spoken words were transcribed below.",
+      "Respond to this transcript now. Your reply text will be read aloud to the user via TTS.",
+      "",
+      "Transcript:",
+      normalized.voiceTurn.transcript,
+    ];
+    if (normalized.voiceTurn.instructions) {
+      voiceLines.push("", normalized.voiceTurn.instructions);
+    }
+    return voiceLines.join("\n").trim();
+  }
+
   const resumedSession = options.resumedSession === true;
   const executionStage = normalized.executionStage;
   const principalLabel = (principal: PaperclipWakeExecutionPrincipal | null) => {

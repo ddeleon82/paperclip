@@ -143,6 +143,10 @@ describe("voice sessions routes (FRE-968)", () => {
             voiceSessionId: SESSION_ID,
             voiceSystemPromptOverride: VOICE_SYSTEM_PROMPT,
             modelOverride: "claude-sonnet-4-6",
+            // FRE-1296: the transcript must ride in contextSnapshot, because
+            // buildPaperclipWakePayload only sees contextSnapshot (the raw
+            // wakeup payload is dropped before prompt construction).
+            voiceTurn: { transcript: "hello world", instructions: VOICE_SYSTEM_PROMPT },
           }),
           requestedByActorType: "user",
           requestedByActorId: USER_ID,

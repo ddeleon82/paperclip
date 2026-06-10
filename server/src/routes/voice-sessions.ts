@@ -87,6 +87,12 @@ export function voiceSessionsRoutes(db: Db) {
         voiceSystemPromptOverride: VOICE_SYSTEM_PROMPT,
         // FRE-1296: absent on non-voice wakeups; absent means the agent's configured model is used unchanged.
         modelOverride: VOICE_WAKEUP_MODEL,
+        // FRE-1296: the transcript must ride in contextSnapshot. The wakeup
+        // payload above never reaches buildPaperclipWakePayload, so a
+        // payload-only transcript is dropped and the run gets a generic
+        // "continue your work" prompt. Instructions ride along because the
+        // system-prompt override is skipped on resumed sessions.
+        voiceTurn: { transcript, instructions: VOICE_SYSTEM_PROMPT },
       },
     });
 
