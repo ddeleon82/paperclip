@@ -4,7 +4,7 @@
  * Mirrors the event shapes handled by fetchFinalAssistantText in VoiceMode.tsx;
  * keep the two in sync if run-log format changes.
  *
- * WARNING — partial-messages double-speak hazard: if the CLI is ever invoked
+ * WARNING - partial-messages double-speak hazard: if the CLI is ever invoked
  * with --include-partial-messages, assistant text will arrive via BOTH
  * content_block_delta text_delta events (streaming) AND the assistant message
  * block at the end of the turn. The extractor currently emits both, which
