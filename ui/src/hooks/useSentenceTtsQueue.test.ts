@@ -59,4 +59,45 @@ describe("sentence TTS queue", () => {
     await tick(); await tick();
     expect(onIdle).toHaveBeenCalledTimes(1);
   });
+
+  it("enqueue after drain() never synthesizes or plays", async () => {
+    const speak = vi.fn().mockResolvedValue(new Blob(["x"]));
+    const play = vi.fn();
+    const q = createTtsQueue(speak, play);
+    q.drain();
+    q.enqueue("Should not speak.");
+    await tick(); await tick();
+    expect(speak).not.toHaveBeenCalled();
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it("end() after drain() never fires onIdle", async () => {
+    const speak = vi.fn().mockResolvedValue(new Blob(["x"]));
+    const onIdle = vi.fn();
+    const q = createTtsQueue(speak, async () => {}, onIdle);
+    q.enqueue("One.");
+    q.drain();
+    q.end();
+    await tick(); await tick();
+    expect(onIdle).not.toHaveBeenCalled();
+  });
+
+  it("play() rejection on sentence N does not prevent sentence N+1 from playing", async () => {
+    const speak = vi
+      .fn()
+      .mockResolvedValueOnce(new Blob(["One."]))
+      .mockResolvedValueOnce(new Blob(["Two."]));
+    const played: string[] = [];
+    const play = vi
+      .fn()
+      .mockRejectedValueOnce(new DOMException("interrupted", "AbortError"))
+      .mockImplementationOnce(async (b: Blob) => {
+        played.push(await b.text());
+      });
+    const q = createTtsQueue(speak, play);
+    q.enqueue("One.");
+    q.enqueue("Two.");
+    await tick(); await tick(); await tick();
+    expect(played).toEqual(["Two."]);
+  });
 });

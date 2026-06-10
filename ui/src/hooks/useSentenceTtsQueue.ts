@@ -24,6 +24,9 @@ export function createTtsQueue(
   let ended = false;
   let generation = 0;
   let idleFired = false;
+  // Once drain() is called the queue is permanently closed. Per-turn instances
+  // are never reused after barge-in, so post-drain enqueue/end are always bugs.
+  let closed = false;
 
   const pump = async (gen: number) => {
     if (playing) return;
@@ -41,7 +44,13 @@ export function createTtsQueue(
         if (!slot.done) return; // head still synthesizing; resolver re-pumps
         slots.shift();
         if (slot.blob && !slot.failed) {
-          await play(slot.blob);
+          try {
+            await play(slot.blob);
+          } catch {
+            // AbortError from barge-in pause while play() is pending, or any
+            // other play rejection. Skip this sentence; the pump continues to
+            // the next slot rather than propagating an unhandled rejection.
+          }
         }
       }
     } finally {
@@ -58,6 +67,9 @@ export function createTtsQueue(
 
   return {
     enqueue(sentence: string) {
+      // No-op after drain(): the per-turn run.log handler may still fire but
+      // any synth or playback it would start belongs to the dead turn.
+      if (closed) return;
       const gen = generation;
       const slot: Slot = { blob: null, failed: false, done: false };
       slots.push(slot);
@@ -74,14 +86,20 @@ export function createTtsQueue(
         });
     },
     end() {
+      // No-op after drain(): onIdle must not fire for a closed queue.
+      if (closed) return;
       ended = true;
       void pump(generation);
     },
     drain() {
+      // Seal the queue permanently. Bumping generation stops any in-flight pump
+      // loop. Dropping slots releases blob references. closed=true makes future
+      // enqueue/end calls inert so streamed run.log events that arrive after
+      // barge-in cannot synthesize or play new audio.
+      closed = true;
       generation += 1;
       slots = [];
-      ended = false;
-      idleFired = false;
+      // Do NOT reset ended/idleFired: the queue is terminal, not reusable.
     },
   };
 }

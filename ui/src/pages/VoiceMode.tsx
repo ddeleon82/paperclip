@@ -577,6 +577,10 @@ export function VoiceMode() {
             status === "timed_out" ||
             status === "cancelled"
           ) {
+            // drain() before stop() so the pump cannot start a new clip in the
+            // gap between stop() clearing isPlaying and drain() sealing the queue.
+            ttsQueueRef.current?.drain();
+            tts.stop();
             dispatch({ type: "ERROR", message: `run ${status}` });
           }
         }
