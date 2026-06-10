@@ -1,0 +1,90 @@
+import path from "node:path";
+
+export interface VoiceGatewayConfig {
+  geminiApiKey: string | null;
+  elevenlabsApiKey: string | null;
+  voiceId: string;
+  liveModel: string;
+  output: "cascade" | "native";
+  warmHoldMs: number;
+  idleTimeoutMs: number;
+  flywheelDir: string | null;
+}
+
+const DEFAULT_VOICE_ID = "VjSFSNiy9sK85Z9QRu3d";
+const DEFAULT_LIVE_MODEL = "gemini-3.1-flash-live-preview";
+const DEFAULT_WARM_HOLD_MS = 60_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
+
+function nullIfEmpty(value: string | undefined): string | null {
+  if (value === undefined || value.trim() === "") return null;
+  return value;
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * Pure builder for voice gateway config. Takes an env map and an optional
+ * data directory (used to derive the flywheel logging path). No process.env
+ * access - callers pass what they need, making this fully testable.
+ */
+export function buildVoiceGatewayConfig(
+  env: Record<string, string | undefined>,
+  dataDir: string | null,
+): VoiceGatewayConfig {
+  const geminiApiKey =
+    nullIfEmpty(env.VOICE_GATEWAY_GEMINI_API_KEY) ??
+    nullIfEmpty(env.GEMINI_API_KEY);
+
+  const elevenlabsApiKey =
+    nullIfEmpty(env.VOICE_GATEWAY_ELEVENLABS_API_KEY) ??
+    nullIfEmpty(env.ELEVENLABS_API_KEY);
+
+  const voiceId = env.VOICE_GATEWAY_VOICE_ID?.trim() || DEFAULT_VOICE_ID;
+
+  const liveModel = env.VOICE_GATEWAY_LIVE_MODEL?.trim() || DEFAULT_LIVE_MODEL;
+
+  const outputRaw = env.VOICE_GATEWAY_OUTPUT?.trim();
+  const output: "cascade" | "native" = outputRaw === "native" ? "native" : "cascade";
+
+  const warmHoldMs = parsePositiveInt(env.VOICE_GATEWAY_WARM_HOLD_MS, DEFAULT_WARM_HOLD_MS);
+
+  const idleTimeoutMs = parsePositiveInt(
+    env.VOICE_GATEWAY_IDLE_TIMEOUT_MS,
+    DEFAULT_IDLE_TIMEOUT_MS,
+  );
+
+  const flywheelDirFromEnv = nullIfEmpty(env.VOICE_GATEWAY_FLYWHEEL_DIR);
+  const flywheelDir =
+    flywheelDirFromEnv ??
+    (dataDir !== null ? path.join(dataDir, "voice-flywheel") : null);
+
+  return {
+    geminiApiKey,
+    elevenlabsApiKey,
+    voiceId,
+    liveModel,
+    output,
+    warmHoldMs,
+    idleTimeoutMs,
+    flywheelDir,
+  };
+}
+
+/**
+ * Gateway is enabled iff:
+ *   - geminiApiKey is present (non-null), AND
+ *   - when output === "cascade", elevenlabsApiKey is also present
+ *
+ * This is a pure function so it can be used both at startup (for logging) and
+ * in route registration logic in later tasks.
+ */
+export function isVoiceGatewayEnabled(cfg: VoiceGatewayConfig): boolean {
+  if (cfg.geminiApiKey === null) return false;
+  if (cfg.output === "cascade" && cfg.elevenlabsApiKey === null) return false;
+  return true;
+}
