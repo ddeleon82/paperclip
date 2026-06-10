@@ -39,7 +39,7 @@ The four portable ada_v2 patterns (verified at source):
 
 Phase 1 ports patterns 1-3 onto the existing pipeline with no rearchitecture. Phase 2 ports the full-duplex session (the thing that actually makes ada_v2 feel like Jarvis) plus multimodal input.
 
-### Decision 1 (Dom must pick before Phase 2 starts): the voice trade-off
+### Decision 1 (CLOSED 2026-06-10: Dom blessed Option B): the voice trade-off
 
 Gemini Live native audio speaks in Gemini's stock voices. There is no Kenn in that world.
 
@@ -547,6 +547,8 @@ NOT bite-sized tasks yet. This chunk is the architecture contract; it becomes it
 **What Phase 1 work survives into Phase 2:** the TTS playback queue (Chunk 3) becomes the client-side audio sink for Option B; sentence-buffer is reused in the gateway; the ack pattern dies (Gemini Live acks natively); useVad dies; the turn-based POST route stays as fallback transport.
 
 **Open items to resolve in the Phase 2 plan:** Live session lifetime/cost model (sessions are long-lived; idle timeout policy), reconnect + context restore (ada_v2 pattern 4), how transcripts land in Paperclip history, multi-user session ownership.
+
+**Adopted from ada_local (github.com/nazirlouis/ada_local, evaluated 2026-06-10):** (1) Data flywheel: the gateway logs every voice turn (user text, assistant text, tool calls, outcome) as fine-tune-ready JSONL from day one; this is the real future-proofing asset, model-agnostic, costs nothing. (2) Local intent router: a tiny CPU model (~200ms, FunctionGemma-style) classifying "chitchat vs dispatch" before anything hits the cloud, cutting Claude invocations and latency. NOT adopted: the local brain itself; ada_local runs Qwen3-1.7B (command-assistant class, not Conrad class), and this VPS (4 vCPU, 7.6GB RAM, no GPU, hosts all of Paperclip) cannot run anything bigger. A real local brain (Qwen 32B class, ~24GB VRAM) is gated on a GPU box and one of: Anthropic pricing change, cloud spend pain, or a corpus worth fine-tuning on. Running a model locally does NOT train it; the corpus is what compounds.
 
 **Exit criteria for Phase 2:** wake /voice, talk full-duplex with sub-2s responses, interrupt mid-sentence naturally, point the camera at something and ask about it, ask for real work and have it dispatched as a background Paperclip run whose result is spoken when ready.
 
