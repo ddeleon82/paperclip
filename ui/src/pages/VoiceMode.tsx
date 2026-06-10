@@ -321,6 +321,9 @@ export function VoiceMode() {
 
     return () => {
       cancelled = true;
+      ackAudioRef.current?.pause();
+      ackCacheRef.current?.dispose();
+      ackCacheRef.current = null;
       const id = sessionIdRef.current;
       if (id) {
         // Fire-and-forget; the server endpoint is idempotent.
@@ -400,7 +403,7 @@ export function VoiceMode() {
             const ackUrl = ackCacheRef.current?.next() ?? null;
             if (ackUrl && ackAudioRef.current) {
               ackAudioRef.current.src = ackUrl;
-              void ackAudioRef.current.play();
+              ackAudioRef.current.play().catch(() => {});
             }
           }
         } else {
