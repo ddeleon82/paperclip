@@ -328,7 +328,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     config.promptTemplate,
     "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work.",
   );
-  const model = asString(config.model, "");
+  // Task 3: per-run model override (e.g. voice wakeups force sonnet to avoid Opus cost).
+  // When absent, falls back to the agent's configured model — no behavior change for non-voice runs.
+  const model = asString(context.modelOverride, "") || asString(config.model, "");
   const effort = asString(config.effort, "");
   const chrome = asBoolean(config.chrome, false);
   const maxTurns = asNumber(config.maxTurnsPerRun, 0);

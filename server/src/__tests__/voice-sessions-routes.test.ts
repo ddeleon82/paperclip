@@ -142,6 +142,7 @@ describe("voice sessions routes (FRE-968)", () => {
           contextSnapshot: expect.objectContaining({
             voiceSessionId: SESSION_ID,
             voiceSystemPromptOverride: VOICE_SYSTEM_PROMPT,
+            modelOverride: "claude-sonnet-4-6",
           }),
           requestedByActorType: "user",
           requestedByActorId: USER_ID,

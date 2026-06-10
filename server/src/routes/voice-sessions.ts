@@ -82,6 +82,9 @@ export function voiceSessionsRoutes(db: Db) {
         voiceSessionId: sessionId,
         // Consumed by Task 20 in the agent run prompt construction.
         voiceSystemPromptOverride: VOICE_SYSTEM_PROMPT,
+        // Task 3: voice runs use sonnet to avoid Opus latency (~40s) and cost (~$1/turn).
+        // Absent on non-voice wakeups; absent means the agent's configured model is used unchanged.
+        modelOverride: "claude-sonnet-4-6",
       },
     });
 
