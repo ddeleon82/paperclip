@@ -17,6 +17,12 @@ import type { MutablePhase } from "@/hooks/useVoiceSessionMachine";
 import { useVoiceCues } from "@/hooks/useVoiceCues";
 import { createAckCache } from "@/hooks/useAckPlayer";
 import type { AckCache } from "@/hooks/useAckPlayer";
+import { createDeltaExtractor } from "@/hooks/streamJsonDeltas";
+import type { DeltaExtractor } from "@/hooks/streamJsonDeltas";
+import { splitIntoSentences } from "@/hooks/sentence-buffer";
+import type { SentenceBuffer } from "@/hooks/sentence-buffer";
+import { createTtsQueue } from "@/hooks/useSentenceTtsQueue";
+import type { TtsQueue } from "@/hooks/useSentenceTtsQueue";
 
 import { VoicePoweredOrb } from "@/components/voice/VoicePoweredOrb";
 import { VoiceScrollback, type VoiceTurn } from "@/components/voice/VoiceScrollback";
@@ -241,6 +247,17 @@ export function VoiceMode() {
   const turnIdRef = useRef<string | null>(null);
   const runIdRef = useRef<string | null>(null);
 
+  // ---- Per-turn streaming TTS state (Task 2 ada_v2 pattern) ---------------
+  // New instances are created for each turn so stale run log chunks from a
+  // prior run cannot enqueue into a new turn's queue. All three are reset
+  // together when the turn POST returns a runId.
+  const ttsQueueRef = useRef<TtsQueue | null>(null);
+  const deltaExtractorRef = useRef<DeltaExtractor | null>(null);
+  const sentenceBufferRef = useRef<SentenceBuffer | null>(null);
+  // Counts sentences enqueued this turn. Used to detect the zero-sentence
+  // fallback path and to know when to dispatch SERVER_THINKING_DONE.
+  const sentencesEnqueuedRef = useRef<number>(0);
+
   // ---- Verbal ack (ada_v2 NON_BLOCKING pattern) --------------------------
   // Pre-cached short phrases played the instant a turn POST succeeds so the
   // user hears confirmation immediately rather than staring at a silent
@@ -395,6 +412,41 @@ export function VoiceMode() {
           | { status: "skipped" };
         if ("runId" in turnBody) {
           runIdRef.current = turnBody.runId;
+          // Create fresh per-turn streaming TTS instances so no stale run can
+          // enqueue into this turn's queue (ada_v2 per-turn staleness discipline).
+          const thisTurnId = localTurnId;
+          deltaExtractorRef.current = createDeltaExtractor();
+          sentenceBufferRef.current = splitIntoSentences();
+          sentencesEnqueuedRef.current = 0;
+          ttsQueueRef.current = createTtsQueue(
+            // speak: call voice.speak and return a Blob
+            (text: string) =>
+              pluginsApi
+                .bridgePerformAction(
+                  VOICE_MODE_PLUGIN_ID,
+                  "voice.speak",
+                  { text, voiceId: KENN_VOICE_ID },
+                  selectedCompanyId,
+                )
+                .then((res) => {
+                  const r = res as { data: { audioBase64: string; mime: string } };
+                  const b64 = r.data?.audioBase64 ?? "";
+                  const mime = r.data?.mime ?? "audio/mpeg";
+                  const bytes = base64ToBytes(b64);
+                  return new Blob([bytes.buffer as ArrayBuffer], { type: mime });
+                }),
+            // play: adapt Blob for useStreamingTts.play()
+            async (blob: Blob) => {
+              const arr = new Uint8Array(await blob.arrayBuffer());
+              // Pause the ack clip before real answer audio starts.
+              ackAudioRef.current?.pause();
+              await ttsRef.current.play(arr);
+            },
+            // onIdle: all sentences played - transition speaking -> listening
+            () => {
+              dispatch({ type: "TTS_END", turnId: thisTurnId });
+            },
+          );
           // Play a pre-cached verbal ack so the user hears instant confirmation
           // while the full 40s agent run runs in the background. Skip if the
           // previous answer is still playing (don't talk over it). The ack
@@ -454,9 +506,52 @@ export function VoiceMode() {
         const activeTurnId = turnIdRef.current;
         if (!runId || runId !== activeRunId || !activeTurnId) return;
 
-        if (event.type === "heartbeat.run.status") {
+        if (event.type === "heartbeat.run.log") {
+          // Stream log chunks into the delta extractor -> sentence buffer -> TTS queue.
+          const chunk = typeof payload["chunk"] === "string" ? payload["chunk"] : "";
+          if (chunk && deltaExtractorRef.current && sentenceBufferRef.current && ttsQueueRef.current) {
+            const deltas = deltaExtractorRef.current.push(chunk);
+            for (const delta of deltas) {
+              const sentences = sentenceBufferRef.current.push(delta);
+              for (const sentence of sentences) {
+                // First sentence: transition machine from thinking -> speaking.
+                if (sentencesEnqueuedRef.current === 0) {
+                  dispatch({ type: "SERVER_THINKING_DONE", turnId: activeTurnId });
+                }
+                sentencesEnqueuedRef.current += 1;
+                ttsQueueRef.current.enqueue(sentence);
+              }
+            }
+          }
+        } else if (event.type === "heartbeat.run.status") {
           const status = typeof payload["status"] === "string" ? payload["status"] : "";
           if (status === "succeeded") {
+            // Flush any tail in the sentence buffer and close the queue.
+            if (sentenceBufferRef.current && ttsQueueRef.current) {
+              const tail = sentenceBufferRef.current.flush();
+              for (const sentence of tail) {
+                if (sentencesEnqueuedRef.current === 0) {
+                  dispatch({ type: "SERVER_THINKING_DONE", turnId: activeTurnId });
+                }
+                sentencesEnqueuedRef.current += 1;
+                ttsQueueRef.current.enqueue(sentence);
+              }
+              if (sentencesEnqueuedRef.current > 0) {
+                // Streamed path: signal end of sentences; onIdle fires TTS_END.
+                ttsQueueRef.current.end();
+                // Fetch full text for the scrollback display (non-blocking).
+                void fetchFinalAssistantText(runId).then((text) => {
+                  if (text) {
+                    setTurns((prev) => [
+                      ...prev,
+                      { id: `${activeTurnId}-assistant`, role: "assistant", text },
+                    ]);
+                  }
+                });
+                return;
+              }
+            }
+            // Fallback: zero sentences streamed (tool-call-only run or extractor miss).
             dispatch({ type: "SERVER_THINKING_DONE", turnId: activeTurnId });
             const text = await fetchFinalAssistantText(runId);
             if (text) {
@@ -555,6 +650,8 @@ export function VoiceMode() {
     if (vad.state === "speaking" && state.phase === "speaking") {
       ackAudioRef.current?.pause();
       tts.stop();
+      // Drain the sentence queue so pending/future sentences don't play.
+      ttsQueueRef.current?.drain();
       dispatch({ type: "BARGE_IN" });
     }
   }, [vad.state, state.phase, tts, dispatch]);
@@ -596,6 +693,7 @@ export function VoiceMode() {
   const handleStop = useCallback(() => {
     ackAudioRef.current?.pause();
     tts.stop();
+    ttsQueueRef.current?.drain();
     if (state.phase === "speaking") {
       dispatch({ type: "BARGE_IN" });
     }
