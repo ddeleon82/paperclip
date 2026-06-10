@@ -15,6 +15,8 @@ import { useStreamingTts } from "@/hooks/useStreamingTts";
 import { useVoiceSessionMachine } from "@/hooks/useVoiceSessionMachine";
 import type { MutablePhase } from "@/hooks/useVoiceSessionMachine";
 import { useVoiceCues } from "@/hooks/useVoiceCues";
+import { createAckCache } from "@/hooks/useAckPlayer";
+import type { AckCache } from "@/hooks/useAckPlayer";
 
 import { VoicePoweredOrb } from "@/components/voice/VoicePoweredOrb";
 import { VoiceScrollback, type VoiceTurn } from "@/components/voice/VoiceScrollback";
@@ -239,6 +241,13 @@ export function VoiceMode() {
   const turnIdRef = useRef<string | null>(null);
   const runIdRef = useRef<string | null>(null);
 
+  // ---- Verbal ack (ada_v2 NON_BLOCKING pattern) --------------------------
+  // Pre-cached short phrases played the instant a turn POST succeeds so the
+  // user hears confirmation immediately rather than staring at a silent
+  // "thinking" state for 40+ seconds.
+  const ackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const ackCacheRef = useRef<AckCache | null>(null);
+
   const [turns, setTurns] = useState<VoiceTurn[]>([]);
   const muted = state.phase === "muted";
   const machinePhase = state.phase;
@@ -280,6 +289,27 @@ export function VoiceMode() {
         if (cancelled) return;
         sessionIdRef.current = body.sessionId;
         setSessionId(body.sessionId);
+        // Build the ack cache and warm it in the background. warm() is
+        // best-effort - failures just mean next() returns null and no ack
+        // plays (not a hard error).
+        const cache = createAckCache((text) =>
+          pluginsApi
+            .bridgePerformAction(
+              VOICE_MODE_PLUGIN_ID,
+              "voice.speak",
+              { text, voiceId: KENN_VOICE_ID },
+              selectedCompanyId,
+            )
+            .then((res) => {
+              const r = res as { data: { audioBase64: string; mime: string } };
+              const b64 = r.data?.audioBase64 ?? "";
+              const mime = r.data?.mime ?? "audio/mpeg";
+              const bytes = base64ToBytes(b64);
+              return new Blob([bytes.buffer as ArrayBuffer], { type: mime });
+            }),
+        );
+        ackCacheRef.current = cache;
+        void cache.warm();
       } catch (err) {
         if (cancelled) return;
         dispatch({
@@ -362,6 +392,17 @@ export function VoiceMode() {
           | { status: "skipped" };
         if ("runId" in turnBody) {
           runIdRef.current = turnBody.runId;
+          // Play a pre-cached verbal ack so the user hears instant confirmation
+          // while the full 40s agent run runs in the background. Skip if the
+          // previous answer is still playing (don't talk over it). The ack
+          // must NOT change machine phase - it is not the answer.
+          if (!ttsRef.current.isPlaying) {
+            const ackUrl = ackCacheRef.current?.next() ?? null;
+            if (ackUrl && ackAudioRef.current) {
+              ackAudioRef.current.src = ackUrl;
+              void ackAudioRef.current.play();
+            }
+          }
         } else {
           // Wakeup was deduped - drop back to listening without a turn.
           runIdRef.current = null;
@@ -456,6 +497,8 @@ export function VoiceMode() {
           return;
         }
         const bytes = base64ToBytes(audioBase64);
+        // Pause the ack clip before real answer audio starts so they don't overlap.
+        ackAudioRef.current?.pause();
         await ttsRef.current.play(bytes);
         // Heuristic: play() resolves once playback starts. Listen for ended
         // via the isPlaying signal in a separate effect below.
@@ -507,6 +550,7 @@ export function VoiceMode() {
   // ---- Barge-in: VAD detects user speech while assistant is speaking ----
   useEffect(() => {
     if (vad.state === "speaking" && state.phase === "speaking") {
+      ackAudioRef.current?.pause();
       tts.stop();
       dispatch({ type: "BARGE_IN" });
     }
@@ -547,6 +591,7 @@ export function VoiceMode() {
   }, [state.phase, dispatch]);
 
   const handleStop = useCallback(() => {
+    ackAudioRef.current?.pause();
     tts.stop();
     if (state.phase === "speaking") {
       dispatch({ type: "BARGE_IN" });
@@ -561,6 +606,11 @@ export function VoiceMode() {
       className="flex h-dvh flex-col bg-background text-foreground"
       data-testid="voice-mode-page"
     >
+      {/* Hidden audio element for pre-cached verbal acks ("On it." etc.).
+          Must NOT route through useStreamingTts so acks never interleave
+          with answer audio. The ref is managed in handleSpeechEnd / paused
+          in three places: answer start, barge-in, and STOP. */}
+      <audio ref={ackAudioRef} aria-hidden="true" />
       <VoiceControls
         muted={muted}
         isSpeaking={tts.isPlaying}
