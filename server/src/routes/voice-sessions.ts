@@ -11,6 +11,9 @@ import { badRequest, forbidden, notFound } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { VOICE_SYSTEM_PROMPT } from "../services/voice-prompt.js";
 
+// FRE-1296: voice runs use sonnet to avoid Opus latency (~40s) and cost (~$1/turn).
+const VOICE_WAKEUP_MODEL = "claude-sonnet-4-6";
+
 const createSessionSchema = z.object({
   companyId: z.string().min(1),
   agentId: z.string().min(1),
@@ -82,9 +85,8 @@ export function voiceSessionsRoutes(db: Db) {
         voiceSessionId: sessionId,
         // Consumed by Task 20 in the agent run prompt construction.
         voiceSystemPromptOverride: VOICE_SYSTEM_PROMPT,
-        // Task 3: voice runs use sonnet to avoid Opus latency (~40s) and cost (~$1/turn).
-        // Absent on non-voice wakeups; absent means the agent's configured model is used unchanged.
-        modelOverride: "claude-sonnet-4-6",
+        // FRE-1296: absent on non-voice wakeups; absent means the agent's configured model is used unchanged.
+        modelOverride: VOICE_WAKEUP_MODEL,
       },
     });
 
