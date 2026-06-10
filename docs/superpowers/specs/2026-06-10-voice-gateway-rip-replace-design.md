@@ -23,7 +23,7 @@ We do not fork the code (Python desktop app; Dom drives /voice from iPhone Safar
 
 ## 3. Approaches considered
 
-**A. Fork ada_v2 literally (Python desktop app + Paperclip API calls).** Rejected. It cannot run in a phone browser, has no auth/multi-user story, and carries CAD/3D-printer baggage. Dom's primary voice device is his iPhone.
+**A. Fork ada_v2 literally (Python desktop app + Paperclip API calls).** Rejected. It cannot run in a phone browser, has no auth/multi-user story, and carries CAD/3D-printer baggage. Dom's primary voice device is his iPhone. The VPS-hosted variant (run ada_v2's Python process on the server, invoked through Paperclip; Dom asked, comment f5824cfc) fails for a related reason: ada_v2's audio I/O is hard-wired to local sound hardware via PyAudio, and a headless VPS has no mic or speakers. Feeding it phone audio means ripping out its entire audio layer and replacing it with the same browser-to-server WebSocket bridge that Approach B builds, at which point what remains is a thin single-user wrapper around the same `@google/genai` Live session, plus a second resident Python process to operate. Approach B IS ada-on-the-VPS, with Paperclip's server as the body.
 
 **B. Rebuild /voice as a thin Gemini Live client behind a server-side gateway (RECOMMENDED).** The browser does two things only: `getUserMedia` (mic permission requested on first tap, <1s, nothing to download) and a WebSocket to our server. The server holds the Gemini Live session and bridges it to Paperclip and ElevenLabs. This is ada_v2's architecture with our stack as the body. Detailed below.
 
