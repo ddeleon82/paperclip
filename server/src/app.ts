@@ -309,6 +309,14 @@ export async function createApp(
       const indexHtmlRaw = fs.readFileSync(path.join(uiDist, "index.html"), "utf-8");
       const indexHtml = applyUiBranding(indexHtmlRaw);
       verifyUiDistFreshness(uiDist, candidates, indexHtmlRaw);
+      // FRE-1296: WASM and ONNX binaries under /vad/ are large (13–26 MB each)
+      // and change only on library upgrades. Serve them with a 1-year immutable
+      // cache so returning visitors (especially on mobile) skip the download.
+      // All other assets keep the default max-age=0 + ETag revalidation.
+      app.use("/vad", express.static(path.join(uiDist, "vad"), {
+        maxAge: "1y",
+        immutable: true,
+      }));
       app.use(express.static(uiDist));
       // Asset-like paths (file extension in the last segment) that miss the
       // static handler are genuinely missing files. Serving index.html for

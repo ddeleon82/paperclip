@@ -720,8 +720,16 @@ export function VoiceMode() {
     }
   }, [tts, state.phase, dispatch]);
 
-  const orbPhase = machinePhaseToOrb(machinePhase);
-  const statusLabel = phaseToStatusLabel(machinePhase);
+  // While the VAD is still downloading / initialising ONNX and requesting
+  // mic permission, keep the orb dim (idle) and show "Loading mic…" so Dom
+  // doesn't stare at a pulsing "Listening" orb that can't hear him yet.
+  const vadLoading = vad.state === "loading";
+  const orbPhase = (machinePhase === "listening" && vadLoading)
+    ? ("idle" as const)
+    : machinePhaseToOrb(machinePhase);
+  const statusLabel = (machinePhase === "listening" && vadLoading)
+    ? "Loading mic…"
+    : phaseToStatusLabel(machinePhase);
 
   return (
     <div
@@ -764,7 +772,8 @@ export function VoiceMode() {
             aria-hidden="true"
             className={cn(
               "inline-block h-2 w-2 rounded-full",
-              machinePhase === "listening" && "animate-pulse bg-emerald-500",
+              machinePhase === "listening" && !vadLoading && "animate-pulse bg-emerald-500",
+              machinePhase === "listening" && vadLoading && "animate-pulse bg-muted-foreground/40",
               machinePhase === "thinking" && "animate-pulse bg-amber-500",
               machinePhase === "speaking" && "bg-sky-500",
               machinePhase === "muted" && "bg-muted-foreground/60",
