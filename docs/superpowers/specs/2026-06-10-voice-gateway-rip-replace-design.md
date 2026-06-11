@@ -105,3 +105,38 @@ Voice layer is pennies per hour (audio in $0.005/min, text out ~$0.001/reply, Fl
 1. **Approve rip-and-replace scope** (section 4): old browser pipeline deleted, gateway lives inside the server process.
 2. **Voice output default:** confirm cascade-with-Kenn (Decision 1 Option B) stays the default, native-audio behind a flag. "Replace with ada_v2" taken literally would mean native audio and no Kenn.
 3. **Wake word v1 = tab-open gating** (section 5); true ambient is a follow-up phase.
+
+---
+
+## 10. Voice gateway env setup (added 2026-06-10 -- implementation record)
+
+The gateway is gated by two required env vars. Both must be set and the server restarted before the gateway activates (the config module loads them at startup via dotenv).
+
+**Required additions to `~/.paperclip/instances/default/.env`:**
+
+```
+VOICE_GATEWAY_GEMINI_API_KEY=<value from 1Password "Gemini API Key" in Clawd Vault>
+VOICE_GATEWAY_ELEVENLABS_API_KEY=<value from 1Password "ElevenLabs API Key" in Clawd Vault>
+```
+
+Both keys were added to `~/.paperclip/instances/default/.env` on 2026-06-10. A server restart is required to pick up the config at process startup (do not restart while Dom is on a live call).
+
+**Verification:** `curl -i http://localhost:3100/api/voice/live` returns `403 Forbidden` (auth challenge) rather than `503 Service Unavailable` when the gateway is enabled. A 503 means the keys are missing or the config did not load.
+
+---
+
+## 11. Implementation deviations from spec section 6 (recorded 2026-06-10)
+
+Two places where the shipped implementation diverges from what section 6 described:
+
+**a) ElevenLabs WS-drop fallback**
+
+Section 6 says: "fall back to non-streaming `voice.speak` per sentence (existing path)".
+
+Shipped behavior: the fallback is a direct non-streaming ElevenLabs HTTP call from the gateway (`POST /v1/text-to-speech/{voiceId}?output_format=mp3_44100_128` with `xi-api-key` header). The gateway runs in-process with the server, so calling the voice-mode plugin worker for a single-sentence fallback adds a round-trip with no benefit. The plugin `voice.speak` path is still available for other callers; this deviation only affects the TTS pipe's fallback branch.
+
+**b) Gemini session recovery on reconnect**
+
+Section 6 says: "gateway reconnects with context restore; client shows reconnect state".
+
+Shipped v1 behavior: on Gemini WS drop, the gateway reconnects with a bare new session and injects a spoken note ("I had a brief connection hiccup. What were we saying?") rather than replaying last-N-messages. Full context-restore (last N messages prepended to the new session prompt) is a recorded follow-up item -- the session state and transcript are persisted in the DB so the data is available; implementing the inject-on-reconnect path was deferred to reduce first-ship scope.
