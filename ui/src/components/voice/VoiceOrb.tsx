@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import type { MutablePhase } from "@/hooks/useVoiceSessionMachine";
+type MutablePhase = "idle" | "listening" | "thinking" | "speaking";
 
 export interface VoiceOrbProps {
   /**

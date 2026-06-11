@@ -19,8 +19,7 @@ import { Renderer, Program, Mesh, Triangle, Vec3 } from "ogl";
 import type { OGLRenderingContext } from "ogl";
 
 import { cn } from "@/lib/utils";
-import type { MutablePhase } from "@/hooks/useVoiceSessionMachine";
-
+type MutablePhase = "idle" | "listening" | "thinking" | "speaking";
 type Phase = MutablePhase | "muted" | "error";
 
 interface VoicePoweredOrbProps {
