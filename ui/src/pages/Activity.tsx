@@ -31,8 +31,8 @@ export function Activity() {
   }, [setBreadcrumbs]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: queryKeys.activity(selectedCompanyId!),
-    queryFn: () => activityApi.list(selectedCompanyId!),
+    queryKey: [...queryKeys.activity(selectedCompanyId!), { limit: 200 }],
+    queryFn: () => activityApi.list(selectedCompanyId!, { limit: 200 }),
     enabled: !!selectedCompanyId,
   });
 

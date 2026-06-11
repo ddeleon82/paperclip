@@ -7,6 +7,22 @@ export interface ActivityFilters {
   agentId?: string;
   entityType?: string;
   entityId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+const DEFAULT_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT = 1000;
+const MAX_FOR_ISSUE_LIMIT = 500;
+
+function clampLimit(value: number | undefined, fallback: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;
+  return Math.min(Math.floor(value), max);
+}
+
+function clampOffset(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
 }
 
 export function activityService(db: Db) {
@@ -45,6 +61,8 @@ export function activityService(db: Db) {
           ),
         )
         .orderBy(desc(activityLog.createdAt))
+        .limit(clampLimit(filters.limit, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT))
+        .offset(clampOffset(filters.offset))
         .then((rows) => rows.map((r) => r.activityLog));
     },
 
@@ -58,7 +76,8 @@ export function activityService(db: Db) {
             eq(activityLog.entityId, issueId),
           ),
         )
-        .orderBy(desc(activityLog.createdAt)),
+        .orderBy(desc(activityLog.createdAt))
+        .limit(MAX_FOR_ISSUE_LIMIT),
 
     runsForIssue: (companyId: string, issueId: string) =>
       db

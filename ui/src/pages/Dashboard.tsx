@@ -57,8 +57,8 @@ export function Dashboard() {
   });
 
   const { data: activity } = useQuery({
-    queryKey: queryKeys.activity(selectedCompanyId!),
-    queryFn: () => activityApi.list(selectedCompanyId!),
+    queryKey: [...queryKeys.activity(selectedCompanyId!), { limit: 50 }],
+    queryFn: () => activityApi.list(selectedCompanyId!, { limit: 50 }),
     enabled: !!selectedCompanyId,
   });
 

@@ -33,11 +33,19 @@ export function activityRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
 
+    const parseIntParam = (value: unknown): number | undefined => {
+      if (typeof value !== "string" || value.trim() === "") return undefined;
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    };
+
     const filters = {
       companyId,
       agentId: req.query.agentId as string | undefined,
       entityType: req.query.entityType as string | undefined,
       entityId: req.query.entityId as string | undefined,
+      limit: parseIntParam(req.query.limit),
+      offset: parseIntParam(req.query.offset),
     };
     const result = await svc.list(filters);
     res.json(result);

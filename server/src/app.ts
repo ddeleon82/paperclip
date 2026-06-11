@@ -1,4 +1,5 @@
 import express, { Router, type Request as ExpressRequest } from "express";
+import compression from "compression";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -134,6 +135,19 @@ export async function createApp(
   },
 ) {
   const app = express();
+
+  // FRE-1348: gzip responses. Large JSON payloads (activity log, issues list)
+  // were shipping multi-MB uncompressed. Skip SSE streams — compressing
+  // text/event-stream buffers events and breaks live streaming.
+  app.use(
+    compression({
+      filter: (req, res) => {
+        const contentType = String(res.getHeader("Content-Type") ?? "");
+        if (contentType.includes("text/event-stream")) return false;
+        return compression.filter(req, res);
+      },
+    }),
+  );
 
   app.use(express.json({
     // Company import/export payloads can inline full portable packages.
