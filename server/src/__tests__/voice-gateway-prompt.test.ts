@@ -70,6 +70,30 @@ describe("buildGatewaySystemPrompt", () => {
   it("does not contain emdashes", () => {
     expect(prompt).not.toContain("\u2014");
   });
+
+  it("contains TASK CREATION section header", () => {
+    expect(prompt).toContain("TASK CREATION:");
+  });
+
+  it("contains create_task call rule for actionable work", () => {
+    expect(prompt).toContain("call create_task with a short title and the full request as detail");
+  });
+
+  it("contains task identifier acknowledgment rule", () => {
+    expect(prompt).toContain("tell the user the task identifier and that Conrad is on it");
+  });
+
+  it("contains rule to not create a task for questions or status updates", () => {
+    expect(prompt).toContain("do not create a task");
+  });
+
+  it("contains alternatives for non-task requests", () => {
+    expect(prompt).toContain("dispatch_to_conrad, check_run, or board_snapshot instead");
+  });
+
+  it("contains rule against creating more than one task per request", () => {
+    expect(prompt).toContain("Never create more than one task per user request");
+  });
 });
 
 // ---------------------------------------------------------------------------
