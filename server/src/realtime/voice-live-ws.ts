@@ -10,19 +10,22 @@ import { authorizeCompanyUpgrade } from "./live-events-ws.js";
 import { isVoiceGatewayEnabled } from "../voice-gateway-config.js";
 import type { VoiceGatewayConfig } from "../voice-gateway-config.js";
 
+interface WsServer {
+  clients: Set<GatewaySocket>;
+  on(event: "connection", listener: (socket: GatewaySocket, req: IncomingMessage) => void): void;
+  on(event: "close", listener: () => void): void;
+  handleUpgrade(
+    req: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    callback: (ws: GatewaySocket) => void,
+  ): void;
+  emit(event: "connection", ws: GatewaySocket, req: IncomingMessage): boolean;
+}
+
 const require = createRequire(import.meta.url);
 const { WebSocketServer } = require("ws") as {
-  WebSocketServer: new (opts: { noServer: boolean }) => {
-    clients: Set<GatewaySocket>;
-    on(event: string, listener: (...args: unknown[]) => void): void;
-    handleUpgrade(
-      req: IncomingMessage,
-      socket: Duplex,
-      head: Buffer,
-      callback: (ws: GatewaySocket) => void,
-    ): void;
-    emit(event: string, ...args: unknown[]): boolean;
-  };
+  WebSocketServer: new (opts: { noServer: boolean }) => WsServer;
 };
 
 /** Minimal structural type over a ws WebSocket, sufficient for the gateway. */
@@ -32,7 +35,10 @@ export interface GatewaySocket {
   send(data: string | Buffer): void;
   terminate(): void;
   close(code?: number, reason?: string): void;
-  on(event: string, listener: (...args: unknown[]) => void): void;
+  on(event: "message", listener: (data: Buffer | string, isBinary: boolean) => void): void;
+  on(event: "pong", listener: () => void): void;
+  on(event: "close", listener: () => void): void;
+  on(event: "error", listener: (err: Error) => void): void;
 }
 
 /** Injected by Task 10 with the real registry. */
