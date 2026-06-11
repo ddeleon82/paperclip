@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { IncomingMessage, Server as HttpServer } from "node:http";
+import type { IncomingMessage } from "node:http";
 import { createRequire } from "node:module";
 import type { Duplex } from "node:stream";
 import { and, eq, isNull } from "drizzle-orm";
@@ -8,6 +8,7 @@ import { agentApiKeys, companyMemberships, instanceUserRoles } from "@paperclipa
 import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
+import type { UpgradeRouter } from "./upgrade-router.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 
 interface WsSocket {
@@ -92,7 +93,7 @@ function headersFromIncomingMessage(req: IncomingMessage): Headers {
   return headers;
 }
 
-async function authorizeUpgrade(
+export async function authorizeCompanyUpgrade(
   db: Db,
   req: IncomingMessage,
   companyId: string,
@@ -176,7 +177,7 @@ async function authorizeUpgrade(
 }
 
 export function setupLiveEventsWebSocketServer(
-  server: HttpServer,
+  router: UpgradeRouter,
   db: Db,
   opts: {
     deploymentMode: DeploymentMode;
@@ -233,41 +234,41 @@ export function setupLiveEventsWebSocketServer(
     clearInterval(pingInterval);
   });
 
-  server.on("upgrade", (req, socket, head) => {
-    if (!req.url) {
-      rejectUpgrade(socket, "400 Bad Request", "missing url");
-      return;
-    }
+  router.register(
+    (pathname) => {
+      const companyId = parseCompanyId(pathname);
+      return companyId ? { companyId } : null;
+    },
+    (req, socket, head, match, url) => {
+      const companyId = match.companyId!;
+      if (!req.url) {
+        rejectUpgrade(socket, "400 Bad Request", "missing url");
+        return;
+      }
 
-    const url = new URL(req.url, "http://localhost");
-    const companyId = parseCompanyId(url.pathname);
-    if (!companyId) {
-      socket.destroy();
-      return;
-    }
-
-    void authorizeUpgrade(db, req, companyId, url, {
-      deploymentMode: opts.deploymentMode,
-      resolveSessionFromHeaders: opts.resolveSessionFromHeaders,
-    })
-      .then((context) => {
-        if (!context) {
-          rejectUpgrade(socket, "403 Forbidden", "forbidden");
-          return;
-        }
-
-        const reqWithContext = req as IncomingMessageWithContext;
-        reqWithContext.paperclipUpgradeContext = context;
-
-        wss.handleUpgrade(req, socket, head, (ws: WsSocket) => {
-          wss.emit("connection", ws, reqWithContext);
-        });
+      void authorizeCompanyUpgrade(db, req, companyId, url, {
+        deploymentMode: opts.deploymentMode,
+        resolveSessionFromHeaders: opts.resolveSessionFromHeaders,
       })
-      .catch((err) => {
-        logger.error({ err, path: req.url }, "failed websocket upgrade authorization");
-        rejectUpgrade(socket, "500 Internal Server Error", "upgrade failed");
-      });
-  });
+        .then((context) => {
+          if (!context) {
+            rejectUpgrade(socket, "403 Forbidden", "forbidden");
+            return;
+          }
+
+          const reqWithContext = req as IncomingMessageWithContext;
+          reqWithContext.paperclipUpgradeContext = context;
+
+          wss.handleUpgrade(req, socket, head, (ws: WsSocket) => {
+            wss.emit("connection", ws, reqWithContext);
+          });
+        })
+        .catch((err) => {
+          logger.error({ err, path: req.url }, "failed websocket upgrade authorization");
+          rejectUpgrade(socket, "500 Internal Server Error", "upgrade failed");
+        });
+    },
+  );
 
   return wss;
 }

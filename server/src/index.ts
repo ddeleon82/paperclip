@@ -29,6 +29,7 @@ import { loadConfig } from "./config.js";
 import { voiceGatewayDisabledReason } from "./voice-gateway-config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
+import { createUpgradeRouter } from "./realtime/upgrade-router.js";
 import {
   feedbackService,
   heartbeatService,
@@ -563,7 +564,9 @@ export async function startServer(): Promise<StartedServer> {
   process.env.PAPERCLIP_LISTEN_PORT = String(listenPort);
   process.env.PAPERCLIP_API_URL = `http://${runtimeApiHost}:${listenPort}`;
   
-  setupLiveEventsWebSocketServer(server, db as any, {
+  const upgradeRouter = createUpgradeRouter();
+  upgradeRouter.bind(server);
+  setupLiveEventsWebSocketServer(upgradeRouter, db as any, {
     deploymentMode: config.deploymentMode,
     resolveSessionFromHeaders,
   });
