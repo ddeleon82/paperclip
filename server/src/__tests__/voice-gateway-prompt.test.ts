@@ -84,7 +84,9 @@ describe("buildGatewaySystemPrompt", () => {
   });
 
   it("contains rule to not create a task for questions or status updates", () => {
-    expect(prompt).toContain("do not create a task");
+    expect(prompt).toContain(
+      "do not create a task. Use dispatch_to_conrad, check_run, or board_snapshot instead"
+    );
   });
 
   it("contains alternatives for non-task requests", () => {
