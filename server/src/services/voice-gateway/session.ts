@@ -46,6 +46,16 @@ export interface GatewaySessionDeps {
   };
   liveClient: LiveClient;
   createTtsPipe(deps: TtsPipeDeps): TtsPipe;
+  /**
+   * Optional real TTS synthesizer (ElevenLabs streaming).
+   * When omitted, falls back to an empty stream (safe for tests).
+   */
+  synthesize?: (sentence: string) => ReadableStream<Uint8Array>;
+  /**
+   * Optional non-streaming TTS fallback (POST /v1/text-to-speech).
+   * When omitted, returns null (no fallback bytes).
+   */
+  synthesizeFallback?: (sentence: string) => Promise<Uint8Array | null>;
   toolDeps: ToolDeps;
   voiceSessions: VoiceSessionsService;
   flywheel: { log(entry: FlywheelEntry): void };
@@ -380,14 +390,18 @@ export function createGatewaySession(deps: GatewaySessionDeps): GatewaySessionHa
   // ---- TtsPipe deps (cascade mode) ----
 
   function makeTtsPipeDeps(): TtsPipeDeps {
-    let seqCounter = 0;
     return {
-      synthesize(_sentence: string): ReadableStream<Uint8Array> {
-        // In production this calls the real synthesizer.
-        // Here we return an immediately-closed stream (tests override createTtsPipe).
+      synthesize(sentence: string): ReadableStream<Uint8Array> {
+        if (deps.synthesize) {
+          return deps.synthesize(sentence);
+        }
+        // Fallback: empty stream (tests override createTtsPipe, so this is unreachable in tests)
         return new ReadableStream({ start(controller) { controller.close(); } });
       },
-      async synthesizeFallback(_sentence: string): Promise<Uint8Array | null> {
+      async synthesizeFallback(sentence: string): Promise<Uint8Array | null> {
+        if (deps.synthesizeFallback) {
+          return deps.synthesizeFallback(sentence);
+        }
         return null;
       },
       sendAudioStart(seq: number): void {

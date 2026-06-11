@@ -30,7 +30,15 @@ import { voiceGatewayDisabledReason } from "./voice-gateway-config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import { setupVoiceLiveWebSocketServer } from "./realtime/voice-live-ws.js";
-import { createVoiceGatewayRegistry } from "./services/voice-gateway/session-registry.js";
+import { createGatewayRegistry } from "./services/voice-gateway/registry.js";
+import { createGatewaySession } from "./services/voice-gateway/session.js";
+import { createGeminiLiveClient } from "./services/voice-gateway/gemini-live.js";
+import { createTtsPipe } from "./services/voice-gateway/tts-pipe.js";
+import { makeToolDeps } from "./services/voice-gateway/tools.js";
+import { createFlywheelLogger } from "./services/voice-gateway/flywheel.js";
+import { voiceSessionsService } from "./services/voice-sessions.js";
+import { subscribeCompanyLiveEvents } from "./services/live-events.js";
+import { streamTextToSpeech } from "./services/voice/elevenlabs-stream.js";
 import { createUpgradeRouter } from "./realtime/upgrade-router.js";
 import {
   feedbackService,
@@ -87,7 +95,7 @@ export interface StartedServer {
 export async function startServer(): Promise<StartedServer> {
   let config = loadConfig();
   initTelemetry({ enabled: config.telemetryEnabled });
-  const vgReason = voiceGatewayDisabledReason(config.voiceGateway);
+  const vgReason = config.voiceGateway ? voiceGatewayDisabledReason(config.voiceGateway) : "voice gateway config absent";
   if (vgReason !== null) {
     logger.info(`voice gateway disabled: ${vgReason}`);
   }
@@ -573,25 +581,73 @@ export async function startServer(): Promise<StartedServer> {
     resolveSessionFromHeaders,
   });
 
-  // FRE-1296 Task 10: Real voice gateway connector.
-  // createVoiceGatewayRegistry wires Gemini Live + ElevenLabs TTS + tool router.
-  // heartbeat is resolved below in the timer setup; grab it here via the same factory.
-  const voiceHeartbeat = heartbeatService(db as any);
-  const voiceGatewayConnector = createVoiceGatewayRegistry({
-    db: db as any,
-    heartbeat: {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // FRE-1296 Task 10 (Step 10.6): Real voice gateway connector.
+  // Uses the new per-session GatewaySession factory + GatewaySessionRegistry.
+  // Only set up when voice gateway is enabled (vgReason === null).
+  if (vgReason === null && config.voiceGateway) {
+    const voiceHeartbeat = heartbeatService(db as any);
+    const voiceToolDeps = makeToolDeps(db as any, {
       wakeup: (agentId, opts) => voiceHeartbeat.wakeup(agentId, opts as any),
       getRun: (runId) => voiceHeartbeat.getRun(runId),
-    },
-    config: config.voiceGateway,
-  });
-  setupVoiceLiveWebSocketServer(upgradeRouter, db as any, {
-    connector: voiceGatewayConnector,
-    voiceGatewayConfig: config.voiceGateway,
-    deploymentMode: config.deploymentMode,
-    resolveSessionFromHeaders,
-  });
+    });
+    const voiceSessions = voiceSessionsService(db as any);
+    const voiceFlywheel = createFlywheelLogger(config.voiceGateway.flywheelDir);
+    const voiceGatewayConnector = createGatewayRegistry({
+      warmHoldMs: config.voiceGateway.warmHoldMs,
+      sessionFactory: (userId, companyId) => {
+        const liveClient = createGeminiLiveClient({
+          apiKey: config.voiceGateway.geminiApiKey ?? "",
+          model: config.voiceGateway.liveModel,
+          output: config.voiceGateway.output,
+        });
+        return createGatewaySession({
+          ctx: {
+            companyId,
+            userId,
+            // agentId is unknown at registry creation time; the "start" message
+            // carries it. The session stores it from the first start message.
+            // Until Task 11 wires real agentId lookup, use a placeholder that
+            // routeToolCall will pass to heartbeat.wakeup.
+            agentId: userId,
+          },
+          liveClient,
+          createTtsPipe,
+          // Wire real ElevenLabs TTS for cascade output. In native output mode
+          // the session never calls synthesize, so it is safe to pass it always.
+          synthesize: config.voiceGateway.elevenlabsApiKey
+            ? (sentence: string) =>
+                streamTextToSpeech({
+                  voiceId: config.voiceGateway.voiceId,
+                  apiKey: config.voiceGateway.elevenlabsApiKey!,
+                  text$: new ReadableStream<string>({
+                    start(ctrl) {
+                      ctrl.enqueue(sentence);
+                      ctrl.close();
+                    },
+                  }),
+                })
+            : undefined,
+          toolDeps: voiceToolDeps,
+          voiceSessions,
+          flywheel: voiceFlywheel,
+          subscribeCompanyLiveEvents,
+          // Task 11 will replace this placeholder with real run-outcome extraction.
+          extractRunOutcome: async (_runId: string) => "Run finished.",
+          config: {
+            warmHoldMs: config.voiceGateway.warmHoldMs,
+            idleTimeoutMs: config.voiceGateway.idleTimeoutMs,
+            output: config.voiceGateway.output,
+          },
+        });
+      },
+    });
+    setupVoiceLiveWebSocketServer(upgradeRouter, db as any, {
+      connector: voiceGatewayConnector,
+      voiceGatewayConfig: config.voiceGateway,
+      deploymentMode: config.deploymentMode,
+      resolveSessionFromHeaders,
+    });
+  }
 
   void reconcilePersistedRuntimeServicesOnStartup(db as any)
     .then((result) => {
