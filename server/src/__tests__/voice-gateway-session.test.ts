@@ -203,6 +203,7 @@ function makeToolDeps(): ToolDeps {
     wakeup: vi.fn().mockResolvedValue({ id: "run-tool-123" }),
     getRunStatus: vi.fn().mockResolvedValue({ status: "running" }),
     boardSnapshot: vi.fn().mockResolvedValue({ counts: {}, recent: [] }),
+    createIssue: vi.fn().mockResolvedValue({ id: "issue-abc", identifier: "FRE-999" }),
   };
 }
 
@@ -698,6 +699,79 @@ describe("GatewaySession - behavior 5: toolCalls", () => {
 
     expect(extractRunOutcome).not.toHaveBeenCalled();
     expect(socket.sentMessages().some((m) => m.type === "run-complete")).toBe(false);
+  });
+
+  it("create_task: task-created arrives before run-dispatched, run-complete fires on terminal status", async () => {
+    const extractRunOutcome = vi.fn().mockResolvedValue("Task logged and dispatched.");
+    const { deps, liveClient } = makeDeps({
+      subscribeCompanyLiveEvents,
+      extractRunOutcome,
+    });
+    const session = createGatewaySession(deps);
+    const socket = makeSocket();
+
+    session.attachSocket(socket);
+    session.handleMessage({ type: "start", agentId: "agent-1" });
+    await vi.waitFor(() => liveClient.connectCallCount === 1);
+    await vi.waitFor(() => socket.sentMessages().some((m) => m.type === "ready"));
+
+    liveClient.emit({
+      toolCalls: [{ id: "tc-5", name: "create_task", args: { title: "Fix the flaky test", detail: "It keeps failing." } }],
+    });
+
+    // task-created must appear before run-dispatched.
+    // Use expect() inside vi.waitFor so it throws (retries) when not yet present.
+    await vi.waitFor(() => {
+      const found = socket.sentMessages().some((m) => m.type === "task-created");
+      expect(found, "task-created message not yet present").toBe(true);
+    }, { timeout: 2000 });
+
+    await vi.waitFor(() => {
+      const found = socket.sentMessages().some((m) => m.type === "run-dispatched");
+      expect(found, "run-dispatched message not yet present").toBe(true);
+    }, { timeout: 2000 });
+
+    const msgs = socket.sentMessages();
+    const taskCreatedIdx = msgs.findIndex((m) => m.type === "task-created");
+    const runDispatchedIdx = msgs.findIndex((m) => m.type === "run-dispatched");
+    expect(taskCreatedIdx).toBeGreaterThanOrEqual(0);
+    expect(runDispatchedIdx).toBeGreaterThanOrEqual(0);
+    expect(taskCreatedIdx).toBeLessThan(runDispatchedIdx);
+
+    const taskCreated = msgs[taskCreatedIdx] as {
+      type: "task-created";
+      identifier: string;
+      title: string;
+      runId: string;
+    };
+    expect(taskCreated.identifier).toBe("FRE-999");
+    expect(taskCreated.title).toBe("Fix the flaky test");
+    expect(taskCreated.runId).toBe("run-tool-123");
+
+    const dispatched = msgs[runDispatchedIdx] as { type: "run-dispatched"; runId: string };
+    expect(dispatched.runId).toBe("run-tool-123");
+
+    // Allow subscription to be established before publishing terminal event
+    await new Promise((r) => setTimeout(r, 20));
+
+    publishLiveEvent({
+      companyId: "co-1",
+      type: "heartbeat.run.status",
+      payload: { runId: "run-tool-123", status: "succeeded" },
+    });
+
+    await vi.waitFor(() => {
+      const found = socket.sentMessages().some((m) => m.type === "run-complete");
+      expect(found, "run-complete message not yet present").toBe(true);
+    }, { timeout: 2000 });
+
+    const runComplete = socket.sentMessages().find((m) => m.type === "run-complete") as {
+      type: "run-complete";
+      runId: string;
+      ok: boolean;
+    };
+    expect(runComplete.runId).toBe("run-tool-123");
+    expect(runComplete.ok).toBe(true);
   });
 });
 

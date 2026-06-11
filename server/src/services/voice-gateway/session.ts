@@ -284,6 +284,18 @@ export function createGatewaySession(deps: GatewaySessionDeps): GatewaySessionHa
     // If this was a dispatch, watch for the run to complete
     if (result.dispatchedRunId) {
       const runId = result.dispatchedRunId;
+
+      // If a task was created, notify the client before the generic run-dispatched
+      // so the UI card exists with identifier + title before run state updates arrive.
+      if (result.createdTask) {
+        send({
+          type: "task-created",
+          identifier: result.createdTask.identifier,
+          title: result.createdTask.title,
+          runId,
+        });
+      }
+
       send({ type: "run-dispatched", runId });
 
       const unsubscribe = deps.subscribeCompanyLiveEvents(ctx.companyId, (event: LiveEvent) => {
