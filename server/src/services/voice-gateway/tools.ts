@@ -22,11 +22,16 @@ export interface ToolDeps {
     counts: Record<string, number>;
     recent: Array<{ identifier: string; title: string; status: string }>;
   }>;
+  createIssue(
+    companyId: string,
+    input: { title: string; body: string },
+  ): Promise<{ id: string; identifier: string } | null>;
 }
 
 export interface ToolCallResult {
   response: Record<string, unknown>;
   dispatchedRunId?: string;
+  createdTask?: { identifier: string; title: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +89,55 @@ export async function routeToolCall(
     case "board_snapshot": {
       const snapshot = await deps.boardSnapshot(ctx.companyId);
       return { response: snapshot };
+    }
+
+    case "create_task": {
+      const title = typeof call.args.title === "string" ? call.args.title.trim() : "";
+      if (!title) {
+        return { response: { error: "empty title" } };
+      }
+
+      const detail = typeof call.args.detail === "string" ? call.args.detail.trim() : "";
+
+      const created = await deps.createIssue(ctx.companyId, { title, body: detail });
+      if (!created) {
+        return { response: { error: "task creation failed" } };
+      }
+
+      const { identifier } = created;
+      const dispatchPrompt = detail
+        ? `Work board task ${identifier}: ${title}. ${detail}`
+        : `Work board task ${identifier}: ${title}.`;
+
+      const modelOverride = process.env.VOICE_WAKEUP_MODEL?.trim() || DEFAULT_VOICE_WAKEUP_MODEL;
+
+      const run = await deps.wakeup(ctx.agentId, {
+        source: "voice_session",
+        triggerDetail: "system",
+        reason: "voice_turn",
+        payload: { transcript: dispatchPrompt, voiceSessionId: ctx.sessionId },
+        requestedByActorType: "user",
+        requestedByActorId: ctx.userId,
+        contextSnapshot: {
+          voiceSessionId: ctx.sessionId,
+          voiceSystemPromptOverride: VOICE_SYSTEM_PROMPT,
+          modelOverride,
+          voiceTurn: { transcript: dispatchPrompt, instructions: VOICE_SYSTEM_PROMPT },
+        },
+      });
+
+      if (!run) {
+        return {
+          response: { identifier, error: "dispatch failed" },
+          createdTask: { identifier, title },
+        };
+      }
+
+      return {
+        response: { identifier, runId: run.id, status: "dispatched" },
+        dispatchedRunId: run.id,
+        createdTask: { identifier, title },
+      };
     }
 
     default:
@@ -146,6 +200,20 @@ export function makeToolDeps(
           status: r.status,
         })),
       };
+    },
+    createIssue: async (companyId, input) => {
+      const { issueService } = await import("../issues.js");
+      const svc = issueService(db);
+      try {
+        const issue = await svc.create(companyId, {
+          title: input.title,
+          description: input.body || null,
+          status: "todo",
+        });
+        return { id: issue.id, identifier: issue.identifier ?? "" };
+      } catch {
+        return null;
+      }
     },
   };
 }

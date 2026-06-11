@@ -14,6 +14,7 @@ function makeDeps(overrides?: Partial<ToolDeps>): ToolDeps {
       counts: { in_progress: 3, todo: 1 },
       recent: [{ identifier: "FRE-1", title: "Test", status: "in_progress" }],
     }),
+    createIssue: vi.fn().mockResolvedValue({ id: "issue-uuid-1", identifier: "FRE-42" }),
     ...overrides,
   };
 }
@@ -204,6 +205,115 @@ describe("GATEWAY_TOOL_DEFS - create_task declaration", () => {
     const decl = GATEWAY_TOOL_DEFS.find((d) => d.name === "create_task");
     expect(decl?.parameters.properties["detail"]).toMatchObject({ type: "string" });
     expect(decl?.parameters.required).not.toContain("detail");
+  });
+});
+
+describe("routeToolCall - create_task", () => {
+  it("creates an issue then dispatches via wakeup with identifier woven into transcript, returning identifier + runId + createdTask", async () => {
+    const deps = makeDeps();
+    const result = await routeToolCall(deps, ctx, {
+      name: "create_task",
+      args: { title: "Ship the new feature", detail: "Make sure tests pass first." },
+    });
+
+    expect(deps.createIssue).toHaveBeenCalledOnce();
+    const [calledCompanyId, calledInput] = (deps.createIssue as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { title: string; body: string },
+    ];
+    expect(calledCompanyId).toBe(ctx.companyId);
+    expect(calledInput.title).toBe("Ship the new feature");
+    expect(calledInput.body).toBe("Make sure tests pass first.");
+
+    expect(deps.wakeup).toHaveBeenCalledOnce();
+    const [calledAgentId, calledOpts] = (deps.wakeup as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(calledAgentId).toBe(ctx.agentId);
+    expect(calledOpts).toMatchObject({
+      source: "voice_session",
+      contextSnapshot: {
+        voiceSystemPromptOverride: VOICE_SYSTEM_PROMPT,
+        voiceTurn: expect.objectContaining({
+          transcript: expect.stringContaining("FRE-42"),
+        }),
+      },
+    });
+
+    expect(result).toEqual({
+      response: { identifier: "FRE-42", runId: "run-123", status: "dispatched" },
+      dispatchedRunId: "run-123",
+      createdTask: { identifier: "FRE-42", title: "Ship the new feature" },
+    });
+  });
+
+  it("returns empty title error and calls nothing when title is blank", async () => {
+    const deps = makeDeps();
+    const result = await routeToolCall(deps, ctx, {
+      name: "create_task",
+      args: { title: "   " },
+    });
+
+    expect(deps.createIssue).not.toHaveBeenCalled();
+    expect(deps.wakeup).not.toHaveBeenCalled();
+    expect(result).toEqual({ response: { error: "empty title" } });
+  });
+
+  it("returns empty title error and calls nothing when title is missing", async () => {
+    const deps = makeDeps();
+    const result = await routeToolCall(deps, ctx, {
+      name: "create_task",
+      args: {},
+    });
+
+    expect(deps.createIssue).not.toHaveBeenCalled();
+    expect(deps.wakeup).not.toHaveBeenCalled();
+    expect(result).toEqual({ response: { error: "empty title" } });
+  });
+
+  it("returns task creation failed error and no wakeup when createIssue returns null", async () => {
+    const deps = makeDeps({ createIssue: vi.fn().mockResolvedValue(null) });
+    const result = await routeToolCall(deps, ctx, {
+      name: "create_task",
+      args: { title: "Valid title" },
+    });
+
+    expect(deps.createIssue).toHaveBeenCalledOnce();
+    expect(deps.wakeup).not.toHaveBeenCalled();
+    expect(result).toEqual({ response: { error: "task creation failed" } });
+  });
+
+  it("reports created identifier with dispatch failed error when wakeup returns null", async () => {
+    const deps = makeDeps({ wakeup: vi.fn().mockResolvedValue(null) });
+    const result = await routeToolCall(deps, ctx, {
+      name: "create_task",
+      args: { title: "Valid title" },
+    });
+
+    expect(deps.createIssue).toHaveBeenCalledOnce();
+    expect(deps.wakeup).toHaveBeenCalledOnce();
+    expect(result).toEqual({
+      response: { identifier: "FRE-42", error: "dispatch failed" },
+      createdTask: { identifier: "FRE-42", title: "Valid title" },
+    });
+  });
+
+  it("builds dispatch prompt without trailing undefined when detail is absent", async () => {
+    const deps = makeDeps();
+    await routeToolCall(deps, ctx, {
+      name: "create_task",
+      args: { title: "Task with no detail" },
+    });
+
+    const [, calledOpts] = (deps.wakeup as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+    ];
+    const snapshot = calledOpts.contextSnapshot as Record<string, unknown>;
+    const voiceTurn = snapshot.voiceTurn as Record<string, unknown>;
+    expect(typeof voiceTurn.transcript).toBe("string");
+    expect((voiceTurn.transcript as string)).not.toContain("undefined");
   });
 });
 
