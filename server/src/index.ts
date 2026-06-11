@@ -30,7 +30,7 @@ import { voiceGatewayDisabledReason } from "./voice-gateway-config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import { setupVoiceLiveWebSocketServer } from "./realtime/voice-live-ws.js";
-import type { VoiceGatewayConnector } from "./realtime/voice-live-ws.js";
+import { createVoiceGatewayRegistry } from "./services/voice-gateway/session-registry.js";
 import { createUpgradeRouter } from "./realtime/upgrade-router.js";
 import {
   feedbackService,
@@ -573,15 +573,21 @@ export async function startServer(): Promise<StartedServer> {
     resolveSessionFromHeaders,
   });
 
-  // FRE-1296 Task 4: Voice live WS route.
-  // Placeholder connector — Task 10 (Step 10.6) replaces this with the real registry.
-  const stubVoiceConnector: VoiceGatewayConnector = {
-    attach(socket) {
-      socket.close(1013, "gateway not wired yet");
+  // FRE-1296 Task 10: Real voice gateway connector.
+  // createVoiceGatewayRegistry wires Gemini Live + ElevenLabs TTS + tool router.
+  // heartbeat is resolved below in the timer setup; grab it here via the same factory.
+  const voiceHeartbeat = heartbeatService(db as any);
+  const voiceGatewayConnector = createVoiceGatewayRegistry({
+    db: db as any,
+    heartbeat: {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      wakeup: (agentId, opts) => voiceHeartbeat.wakeup(agentId, opts as any),
+      getRun: (runId) => voiceHeartbeat.getRun(runId),
     },
-  };
+    config: config.voiceGateway,
+  });
   setupVoiceLiveWebSocketServer(upgradeRouter, db as any, {
-    connector: stubVoiceConnector,
+    connector: voiceGatewayConnector,
     voiceGatewayConfig: config.voiceGateway,
     deploymentMode: config.deploymentMode,
     resolveSessionFromHeaders,
