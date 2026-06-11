@@ -68,6 +68,11 @@ class FakeWs {
     queueMicrotask(() => this.emit("close", { type: "close" }));
   }
 
+  /** Test helper: inject a server-sent JSON message. */
+  emitMessage(payload: Record<string, unknown>) {
+    this.emit("message", { data: JSON.stringify(payload) });
+  }
+
   private emit(type: string, ev: unknown) {
     for (const cb of this.listeners[type] ?? []) cb(ev);
   }
@@ -201,6 +206,28 @@ describe("streamTextToSpeech (server copy)", () => {
     });
     // drainStream resolves only when the ReadableStream closes
     await expect(drainStream(audio$)).resolves.toBeDefined();
+  });
+
+  it("errors the stream when ElevenLabs sends a protocol error message", async () => {
+    const f = makeFactory();
+    // Keep text$ open so only the error can terminate the stream.
+    const text$ = new ReadableStream<string>({ start() { /* stays open */ } });
+    const audio$ = streamTextToSpeech({
+      voiceId: "test-voice",
+      text$,
+      apiKey: "key",
+      wsFactory: f.factory,
+    });
+    const reader = audio$.getReader();
+    const pending = reader.read();
+    // Let the open microtask fire, then emit a payment_issue error like the real API.
+    await new Promise((r) => setTimeout(r, 0));
+    f.ws!.emitMessage({
+      message: "Your subscription has a failed or incomplete payment. Complete the latest invoice to continue usage.",
+      error: "payment_issue",
+      code: 1008,
+    });
+    await expect(pending).rejects.toThrow(/payment_issue.*failed or incomplete payment/);
   });
 
   it("accepts a custom modelId and puts it in the URL", () => {

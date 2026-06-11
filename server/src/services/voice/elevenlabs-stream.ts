@@ -58,8 +58,18 @@ export function streamTextToSpeech(opts: StreamTtsOpts): ReadableStream<Uint8Arr
       ws.addEventListener("message", (ev) => {
         const raw = (ev as MessageEvent).data;
         if (typeof raw === "string") {
-          let data: { audio?: string; isFinal?: boolean } | null = null;
+          let data: { audio?: string; isFinal?: boolean; error?: string; message?: string } | null = null;
           try { data = JSON.parse(raw); } catch { /* ignore parse errors */ }
+          // Surface protocol errors (e.g. payment_issue, quota_exceeded) instead
+          // of silently closing with no audio.
+          if (data?.error) {
+            closed = true;
+            try {
+              controller.error(new Error(`elevenlabs ${data.error}: ${data.message ?? "unknown error"}`));
+            } catch { /* already closed */ }
+            try { ws.close(); } catch { /* already closing */ }
+            return;
+          }
           if (data?.audio) {
             const bin = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
             try { controller.enqueue(bin); } catch { /* stream closed */ }
