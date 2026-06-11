@@ -29,6 +29,8 @@ import { loadConfig } from "./config.js";
 import { voiceGatewayDisabledReason } from "./voice-gateway-config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
+import { setupVoiceLiveWebSocketServer } from "./realtime/voice-live-ws.js";
+import type { VoiceGatewayConnector } from "./realtime/voice-live-ws.js";
 import { createUpgradeRouter } from "./realtime/upgrade-router.js";
 import {
   feedbackService,
@@ -567,6 +569,20 @@ export async function startServer(): Promise<StartedServer> {
   const upgradeRouter = createUpgradeRouter();
   upgradeRouter.bind(server);
   setupLiveEventsWebSocketServer(upgradeRouter, db as any, {
+    deploymentMode: config.deploymentMode,
+    resolveSessionFromHeaders,
+  });
+
+  // FRE-1296 Task 4: Voice live WS route.
+  // Placeholder connector — Task 10 (Step 10.6) replaces this with the real registry.
+  const stubVoiceConnector: VoiceGatewayConnector = {
+    attach(socket) {
+      socket.close(1013, "gateway not wired yet");
+    },
+  };
+  setupVoiceLiveWebSocketServer(upgradeRouter, db as any, {
+    connector: stubVoiceConnector,
+    voiceGatewayConfig: config.voiceGateway,
     deploymentMode: config.deploymentMode,
     resolveSessionFromHeaders,
   });
