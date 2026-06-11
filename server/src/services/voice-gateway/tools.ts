@@ -211,7 +211,8 @@ export function makeToolDeps(
           status: "todo",
         });
         return { id: issue.id, identifier: issue.identifier ?? "" };
-      } catch {
+      } catch (err) {
+        console.warn("[voice-gateway] createIssue failed", err);
         return null;
       }
     },
