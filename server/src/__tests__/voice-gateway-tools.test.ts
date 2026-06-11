@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { routeToolCall, type ToolDeps } from "../services/voice-gateway/tools.js";
 import { VOICE_SYSTEM_PROMPT } from "../services/voice-prompt.js";
+import { GATEWAY_TOOL_DEFS } from "../services/voice-gateway/tool-defs.js";
+import type { ServerMessage } from "../services/voice-gateway/protocol.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 
@@ -183,5 +185,37 @@ describe("routeToolCall - unknown tool", () => {
     expect(deps.wakeup).not.toHaveBeenCalled();
     expect(deps.getRunStatus).not.toHaveBeenCalled();
     expect(deps.boardSnapshot).not.toHaveBeenCalled();
+  });
+});
+
+describe("GATEWAY_TOOL_DEFS - create_task declaration", () => {
+  it("contains a create_task declaration", () => {
+    const decl = GATEWAY_TOOL_DEFS.find((d) => d.name === "create_task");
+    expect(decl).toBeDefined();
+  });
+
+  it("create_task declaration has required title (string) property", () => {
+    const decl = GATEWAY_TOOL_DEFS.find((d) => d.name === "create_task");
+    expect(decl?.parameters.properties["title"]).toMatchObject({ type: "string" });
+    expect(decl?.parameters.required).toContain("title");
+  });
+
+  it("create_task declaration has optional detail (string) property", () => {
+    const decl = GATEWAY_TOOL_DEFS.find((d) => d.name === "create_task");
+    expect(decl?.parameters.properties["detail"]).toMatchObject({ type: "string" });
+    expect(decl?.parameters.required).not.toContain("detail");
+  });
+});
+
+describe("ServerMessage protocol - task-created member", () => {
+  it("accepts a task-created message (type-level assignment)", () => {
+    // If ServerMessage does not include { type: "task-created"; ... }, TypeScript compilation fails.
+    const msg: ServerMessage = {
+      type: "task-created",
+      identifier: "FRE-1234",
+      title: "Build the thing",
+      runId: "run-abc",
+    };
+    expect(msg.type).toBe("task-created");
   });
 });

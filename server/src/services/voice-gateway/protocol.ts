@@ -19,6 +19,7 @@ export type ServerMessage =
   | { type: "interrupt" }
   | { type: "run-dispatched"; runId: string }
   | { type: "run-complete"; runId: string; ok: boolean }
+  | { type: "task-created"; identifier: string; title: string; runId: string }
   | { type: "status"; state: "listening" | "thinking" | "speaking" }
   | { type: "superseded" }
   | { type: "error"; message: string };

@@ -66,9 +66,33 @@ export const BOARD_SNAPSHOT: GatewayFunctionDeclaration = {
   },
 };
 
-/** All three declarations in a flat array, ready to pass to LiveClient.connect(). */
+/**
+ * Create a Paperclip board task from the user's request, then start Conrad on it.
+ */
+export const CREATE_TASK: GatewayFunctionDeclaration = {
+  name: "create_task",
+  description:
+    "Create a task on the Paperclip board from the user's request and start Conrad working on it. Returns the task identifier and a runId. Use when the user asks for NEW actionable work. Do not use for questions or status checks.",
+  parameters: {
+    type: "object",
+    properties: {
+      title: {
+        type: "string",
+        description: "Short imperative task title, under 80 characters.",
+      },
+      detail: {
+        type: "string",
+        description: "The user's full request, verbatim or lightly cleaned up.",
+      },
+    },
+    required: ["title"],
+  },
+};
+
+/** All four declarations in a flat array, ready to pass to LiveClient.connect(). */
 export const GATEWAY_TOOL_DEFS: GatewayFunctionDeclaration[] = [
   DISPATCH_TO_CONRAD,
   CHECK_RUN,
   BOARD_SNAPSHOT,
+  CREATE_TASK,
 ];
