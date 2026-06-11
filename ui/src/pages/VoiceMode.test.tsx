@@ -8,7 +8,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
-// Router mock — VoiceMode imports useNavigate from "@/lib/router".
+// Router mock
 // ---------------------------------------------------------------------------
 const navigateMock = vi.fn();
 vi.mock("@/lib/router", () => ({
@@ -16,67 +16,79 @@ vi.mock("@/lib/router", () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Company context — VoiceMode reads `selectedCompanyId`.
+// Company context
 // ---------------------------------------------------------------------------
 vi.mock("@/context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "co-1" }),
 }));
 
 // ---------------------------------------------------------------------------
-// React Query — return a synthetic agent list so agentId resolves.
+// React Query — synthetic agent list: Conrad is first.
 // ---------------------------------------------------------------------------
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({ data: [{ id: "agent-1" }] }),
+  useQuery: () => ({ data: [{ id: "agent-1", name: "Conrad" }] }),
 }));
 
 vi.mock("@/lib/queryKeys", () => ({
   queryKeys: { agents: { list: (id: string) => ["agents", id] } },
 }));
 
-// ---------------------------------------------------------------------------
-// Hooks — keep them inert so the page test only covers wiring.
-// ---------------------------------------------------------------------------
-vi.mock("@/hooks/useVad", () => ({
-  useVad: () => ({ state: "listening", pause: vi.fn(), resume: vi.fn() }),
+vi.mock("@/api/agents", () => ({
+  agentsApi: { list: vi.fn().mockResolvedValue([{ id: "agent-1", name: "Conrad" }]) },
 }));
 
-const ttsControls = {
-  play: vi.fn().mockResolvedValue(undefined),
-  stop: vi.fn(),
-  isPlaying: false,
-  // The orb polls getLevel() each frame; in jsdom it always reports silence.
-  getLevel: vi.fn(() => 0),
-  // Resolves immediately in tests; real impl awaits clip ended/pause event.
-  waitUntilDone: vi.fn().mockResolvedValue(undefined),
-};
-vi.mock("@/hooks/useStreamingTts", () => ({
-  useStreamingTts: () => ttsControls,
+// ---------------------------------------------------------------------------
+// useMicPcmStream — noop (we don't test mic capture at this level)
+// ---------------------------------------------------------------------------
+vi.mock("@/hooks/useMicPcmStream", () => ({
+  useMicPcmStream: () => ({ state: "capturing" }),
 }));
 
-const dispatchMock = vi.fn();
-vi.mock("@/hooks/useVoiceSessionMachine", () => ({
-  useVoiceSessionMachine: () => ({
-    state: { phase: "listening" },
-    dispatch: dispatchMock,
+// ---------------------------------------------------------------------------
+// audio-frame-queue — stub sink so no real audio is enqueued
+// ---------------------------------------------------------------------------
+vi.mock("@/hooks/audio-frame-queue", () => ({
+  createAudioFrameSink: () => ({
+    onAudioStart: vi.fn(),
+    onAudioChunk: vi.fn(),
+    onAudioEnd: vi.fn(),
+    interrupt: vi.fn(),
+    end: vi.fn(),
   }),
 }));
 
 // ---------------------------------------------------------------------------
-// API mocks — the plugin action client is invoked via pluginsApi.
+// useVoiceGatewaySocket — expose captured callbacks so tests can simulate
+// server messages and audio frames.
 // ---------------------------------------------------------------------------
-vi.mock("@/api/agents", () => ({
-  agentsApi: { list: vi.fn().mockResolvedValue([{ id: "agent-1" }]) },
-}));
-vi.mock("@/api/heartbeats", () => ({
-  heartbeatsApi: { log: vi.fn().mockResolvedValue({ content: "" }) },
-}));
-vi.mock("@/api/plugins", () => ({
-  pluginsApi: { bridgePerformAction: vi.fn().mockResolvedValue({ data: {} }) },
-}));
+import type { GatewaySocketCallbacks, ServerMessage } from "@/hooks/useVoiceGatewaySocket";
+
+let capturedCallbacks: GatewaySocketCallbacks | null = null;
+const sendMock = vi.fn();
+const sendAudioMock = vi.fn();
+
+vi.mock("@/hooks/useVoiceGatewaySocket", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/hooks/useVoiceGatewaySocket")>();
+  return {
+    ...original,
+    useVoiceGatewaySocket: (opts: {
+      companyId: string;
+      agentId: string;
+      enabled: boolean;
+      callbacks: GatewaySocketCallbacks;
+    }) => {
+      capturedCallbacks = opts.callbacks;
+      return {
+        send: sendMock,
+        sendAudio: sendAudioMock,
+        state: "idle",
+      };
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
-// VoicePoweredOrb — stub the WebGL implementation so we can assert what props
-// the page passes through. jsdom can't run the real shader anyway.
+// VoicePoweredOrb — stub; jsdom can't run WebGL
 // ---------------------------------------------------------------------------
 const orbPropsLog: Array<Record<string, unknown>> = [];
 vi.mock("@/components/voice/VoicePoweredOrb", () => ({
@@ -86,7 +98,6 @@ vi.mock("@/components/voice/VoicePoweredOrb", () => ({
       <div
         data-testid="voice-orb"
         data-phase={String(props.phase ?? "")}
-        data-has-level={typeof props.getLevel === "function" ? "yes" : "no"}
       />
     );
   },
@@ -97,48 +108,36 @@ vi.mock("@/components/voice/VoicePoweredOrb", () => ({
 
 import { VoiceMode } from "./VoiceMode";
 
-describe("VoiceMode page", () => {
+// ---------------------------------------------------------------------------
+// Helper to push a server message through the captured callbacks
+// ---------------------------------------------------------------------------
+function pushMsg(msg: ServerMessage) {
+  capturedCallbacks?.onServerMessage(msg);
+}
+
+describe("VoiceMode page (gateway client)", () => {
   let container: HTMLDivElement;
   let root: Root;
-  const fetchMock = vi.fn();
 
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
     navigateMock.mockReset();
-    dispatchMock.mockReset();
-    ttsControls.play.mockReset();
-    ttsControls.stop.mockReset();
-    ttsControls.getLevel.mockReset();
-    ttsControls.getLevel.mockReturnValue(0);
-    ttsControls.isPlaying = false;
+    sendMock.mockReset();
+    sendAudioMock.mockReset();
     orbPropsLog.length = 0;
+    capturedCallbacks = null;
 
-    fetchMock.mockReset();
-    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-      if (typeof url === "string" && url.includes("/api/voice/session") && init?.method === "POST") {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ sessionId: "sess-1" }),
-        } as unknown as Response;
-      }
-      return { ok: true, status: 204, json: async () => ({}) } as unknown as Response;
-    });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-    // Stub WebSocket so the WS effect does not throw in jsdom.
-    class FakeSocket {
-      readyState = 1;
-      onmessage: ((e: MessageEvent) => void) | null = null;
-      onerror: ((e: Event) => void) | null = null;
-      onclose: ((e: CloseEvent) => void) | null = null;
-      onopen: ((e: Event) => void) | null = null;
-      close() {}
-    }
+    // Stub HTMLAudioElement.play (jsdom doesn't implement media playback)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).WebSocket = FakeSocket as any;
+    (globalThis as any).HTMLMediaElement.prototype.play = vi.fn().mockResolvedValue(undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).HTMLMediaElement.prototype.pause = vi.fn();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).URL.createObjectURL = vi.fn(() => "blob:test");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).URL.revokeObjectURL = vi.fn();
   });
 
   afterEach(() => {
@@ -147,9 +146,7 @@ describe("VoiceMode page", () => {
   });
 
   it("renders orb, scrollback, and controls", async () => {
-    await act(async () => {
-      root.render(<VoiceMode />);
-    });
+    await act(async () => { root.render(<VoiceMode />); });
     expect(container.querySelector('[data-testid="voice-orb"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="voice-controls"]')).not.toBeNull();
     expect(
@@ -158,74 +155,110 @@ describe("VoiceMode page", () => {
     ).not.toBeNull();
   });
 
-  it("renders a mic-ready status indicator wired to the session phase", async () => {
-    await act(async () => {
-      root.render(<VoiceMode />);
-    });
+  it("starts in idle/connecting phase with Connecting status", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
     const status = container.querySelector<HTMLElement>('[data-testid="voice-mode-status"]');
     expect(status).not.toBeNull();
-    // Hook mock pins state.phase = "listening" so the indicator must reflect that.
+    expect(status!.dataset.phase).toBe("idle");
+    expect(status!.textContent ?? "").toMatch(/connecting/i);
+  });
+
+  it("transitions to listening when server sends ready", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => { pushMsg({ type: "ready", sessionId: "sess-1" }); });
+    const status = container.querySelector<HTMLElement>('[data-testid="voice-mode-status"]');
     expect(status!.dataset.phase).toBe("listening");
     expect(status!.textContent ?? "").toMatch(/listening/i);
   });
 
-  it("passes the TTS getLevel function through to the orb so it can react to voice output", async () => {
-    await act(async () => {
-      root.render(<VoiceMode />);
-    });
-    const orb = container.querySelector<HTMLElement>('[data-testid="voice-orb"]');
-    expect(orb).not.toBeNull();
-    expect(orb!.dataset.hasLevel).toBe("yes");
-    const lastProps = orbPropsLog[orbPropsLog.length - 1];
-    expect(typeof lastProps.getLevel).toBe("function");
-    // Calling the prop should delegate to the TTS hook's getLevel.
-    (lastProps.getLevel as () => number)();
-    expect(ttsControls.getLevel).toHaveBeenCalled();
+  it("transitions to thinking when server sends status:thinking", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => { pushMsg({ type: "status", state: "thinking" }); });
+    const status = container.querySelector<HTMLElement>('[data-testid="voice-mode-status"]');
+    expect(status!.dataset.phase).toBe("thinking");
+    expect(status!.textContent ?? "").toMatch(/thinking/i);
   });
 
-  it("creates a voice session on mount", async () => {
-    await act(async () => {
-      root.render(<VoiceMode />);
-    });
-    // Flush microtasks so the async POST resolves.
-    await act(async () => {
-      await Promise.resolve();
-    });
+  it("transitions to speaking when server sends status:speaking", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => { pushMsg({ type: "status", state: "speaking" }); });
+    const status = container.querySelector<HTMLElement>('[data-testid="voice-mode-status"]');
+    expect(status!.dataset.phase).toBe("speaking");
+  });
 
-    const postCalls = fetchMock.mock.calls.filter(
-      ([url, init]) => url === "/api/voice/session" && (init as RequestInit | undefined)?.method === "POST",
+  it("adds a final transcript turn to the scrollback", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => {
+      pushMsg({ type: "transcript", role: "user", text: "Hello Conrad", final: true });
+    });
+    const scrollback = container.querySelector('[data-testid="voice-scrollback"]');
+    expect(scrollback?.textContent ?? "").toContain("Hello Conrad");
+  });
+
+  it("does NOT add non-final transcript turns to scrollback", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => {
+      pushMsg({ type: "transcript", role: "user", text: "Hello", final: false });
+    });
+    const scrollback = container.querySelector('[data-testid="voice-scrollback"]');
+    // No turns rendered yet; the empty state testid should be present
+    expect(
+      container.querySelector('[data-testid="voice-scrollback-empty"]'),
+    ).not.toBeNull();
+    expect(scrollback?.textContent ?? "").not.toContain("Hello");
+  });
+
+  it("shows error message and sets error phase on server error", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => {
+      pushMsg({ type: "error", message: "something went wrong" });
+    });
+    const status = container.querySelector<HTMLElement>('[data-testid="voice-mode-status"]');
+    expect(status!.dataset.phase).toBe("error");
+    const errEl = container.querySelector('[data-testid="voice-mode-error"]');
+    expect(errEl?.textContent).toContain("something went wrong");
+  });
+
+  it("sends mute/unmute messages on toggle and updates phase", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    // Transition to listening first so toggle is meaningful
+    await act(async () => { pushMsg({ type: "ready", sessionId: "s1" }); });
+
+    const muteButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="voice-control-mute"]',
     );
-    expect(postCalls.length).toBe(1);
-    const body = JSON.parse(
-      (postCalls[0][1] as RequestInit).body as string,
-    ) as { companyId: string; agentId: string };
-    expect(body).toEqual({ companyId: "co-1", agentId: "agent-1" });
+    expect(muteButton).not.toBeNull();
+
+    // Mute
+    await act(async () => { muteButton!.click(); });
+    expect(sendMock).toHaveBeenCalledWith({ type: "mute" });
+    const status = container.querySelector<HTMLElement>('[data-testid="voice-mode-status"]');
+    expect(status!.dataset.phase).toBe("muted");
+
+    // Unmute
+    await act(async () => { muteButton!.click(); });
+    expect(sendMock).toHaveBeenCalledWith({ type: "unmute" });
+    expect(status!.dataset.phase).toBe("listening");
   });
 
-  it("DELETEs the session when End is clicked", async () => {
-    await act(async () => {
-      root.render(<VoiceMode />);
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
+  it("sends end message and navigates on End button click", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
 
     const endButton = container.querySelector<HTMLButtonElement>(
       '[data-testid="voice-control-end"]',
     );
     expect(endButton).not.toBeNull();
 
-    await act(async () => {
-      endButton!.click();
-    });
+    await act(async () => { endButton!.click(); });
 
-    const deleteCalls = fetchMock.mock.calls.filter(
-      ([url, init]) =>
-        typeof url === "string" &&
-        url.startsWith("/api/voice/session/sess-1") &&
-        (init as RequestInit | undefined)?.method === "DELETE",
-    );
-    expect(deleteCalls.length).toBeGreaterThanOrEqual(1);
+    expect(sendMock).toHaveBeenCalledWith({ type: "end" });
     expect(navigateMock).toHaveBeenCalledWith("/dashboard");
+  });
+
+  it("orb receives the correct phase prop", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => { pushMsg({ type: "ready", sessionId: "s1" }); });
+    const orb = container.querySelector<HTMLElement>('[data-testid="voice-orb"]');
+    expect(orb!.dataset.phase).toBe("listening");
   });
 });

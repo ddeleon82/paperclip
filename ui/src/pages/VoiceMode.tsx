@@ -1,279 +1,74 @@
+/**
+ * VoiceMode.tsx — thin voice gateway client (FRE-1296 rip-and-replace).
+ *
+ * Architecture:
+ *   useMicPcmStream → PCM16 chunks → useVoiceGatewaySocket → /api/voice/live
+ *   /api/voice/live → tagged audio frames → createAudioFrameSink → <audio>
+ *
+ * All VAD, STT, TTS, and run-watching logic has moved to the server-side
+ * Gemini Live gateway. This component only wires the three hooks together and
+ * renders the existing presentational layer unchanged.
+ */
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { LiveEvent } from "@paperclipai/shared";
 
 import { useNavigate } from "@/lib/router";
 import { cn } from "@/lib/utils";
 import { useCompany } from "@/context/CompanyContext";
 import { agentsApi } from "@/api/agents";
-import { heartbeatsApi } from "@/api/heartbeats";
-import { pluginsApi } from "@/api/plugins";
 import { queryKeys } from "@/lib/queryKeys";
 
-import { useVad } from "@/hooks/useVad";
-import { useStreamingTts } from "@/hooks/useStreamingTts";
-import { useVoiceSessionMachine } from "@/hooks/useVoiceSessionMachine";
-import type { MutablePhase } from "@/hooks/useVoiceSessionMachine";
-import { useVoiceCues } from "@/hooks/useVoiceCues";
-import { createAckCache } from "@/hooks/useAckPlayer";
-import type { AckCache } from "@/hooks/useAckPlayer";
-import { createDeltaExtractor } from "@/hooks/streamJsonDeltas";
-import type { DeltaExtractor } from "@/hooks/streamJsonDeltas";
-import { splitIntoSentences } from "@/hooks/sentence-buffer";
-import type { SentenceBuffer } from "@/hooks/sentence-buffer";
-import { createTtsQueue } from "@/hooks/useSentenceTtsQueue";
-import type { TtsQueue } from "@/hooks/useSentenceTtsQueue";
+import { useMicPcmStream } from "@/hooks/useMicPcmStream";
+import {
+  useVoiceGatewaySocket,
+  type GatewaySocketCallbacks,
+} from "@/hooks/useVoiceGatewaySocket";
+import { createAudioFrameSink } from "@/hooks/audio-frame-queue";
+import type { ServerMessage } from "@/hooks/useVoiceGatewaySocket";
 
 import { VoicePoweredOrb } from "@/components/voice/VoicePoweredOrb";
 import { VoiceScrollback, type VoiceTurn } from "@/components/voice/VoiceScrollback";
 import { VoiceControls } from "@/components/voice/VoiceControls";
 
-/**
- * Kenn Akomea (ElevenLabs). Hard-coded per FRE-968 plan - Conrad's voice.
- */
-const KENN_VOICE_ID = "VjSFSNiy9sK85Z9QRu3d";
-
-const VOICE_MODE_PLUGIN_ID = "voice-mode";
-
 // ---------------------------------------------------------------------------
-// WAV encoding helpers - VAD gives Float32 PCM @ 16kHz mono. ElevenLabs STT
-// accepts WAV directly, so we wrap a minimal 16-bit PCM WAV header.
+// Phase — matches VoicePoweredOrb's accepted Phase union
 // ---------------------------------------------------------------------------
 
-const VAD_SAMPLE_RATE = 16000;
+type Phase = "idle" | "listening" | "thinking" | "speaking" | "muted" | "error";
 
-function floatTo16BitPCM(input: Float32Array): Int16Array {
-  const out = new Int16Array(input.length);
-  for (let i = 0; i < input.length; i++) {
-    const s = Math.max(-1, Math.min(1, input[i]));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-  return out;
-}
-
-function encodeWav(samples: Float32Array, sampleRate: number): Uint8Array {
-  const pcm = floatTo16BitPCM(samples);
-  const byteLength = pcm.length * 2;
-  const buffer = new ArrayBuffer(44 + byteLength);
-  const view = new DataView(buffer);
-
-  const writeString = (offset: number, str: string) => {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i));
-    }
-  };
-
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + byteLength, true);
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true); // fmt chunk size
-  view.setUint16(20, 1, true); // PCM format
-  view.setUint16(22, 1, true); // mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // byte rate
-  view.setUint16(32, 2, true); // block align
-  view.setUint16(34, 16, true); // bits per sample
-  writeString(36, "data");
-  view.setUint32(40, byteLength, true);
-
-  const out = new Uint8Array(buffer);
-  // Copy PCM samples in little-endian after the header.
-  const pcmBytes = new Uint8Array(pcm.buffer);
-  out.set(pcmBytes, 44);
-  return out;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    const slice = bytes.subarray(i, Math.min(i + chunk, bytes.length));
-    binary += String.fromCharCode(...slice);
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers for resolving the current phase into the orb's mutable phase view.
-// ---------------------------------------------------------------------------
-
-function machinePhaseToOrb(
-  phase: "idle" | "listening" | "thinking" | "speaking" | "muted" | "error",
-): MutablePhase | "muted" | "error" {
-  if (phase === "muted" || phase === "error") return phase;
-  return phase;
-}
-
-// ---------------------------------------------------------------------------
-// Best-effort assistant-message extractor from the run log.
-//
-// The agent run writes NDJSON lines `{ stream, chunk }` to its log. For
-// claude_local runs the stdout chunks are themselves stream-json events
-// (`--output-format stream-json`), so the last chunk is a `{"type":"result",
-// ...}` envelope — speaking that raw JSON aloud was the FRE-1296 bug. We now
-// parse stream-json and return the `result` text (falling back to the last
-// assistant message text block, then to raw text for non-claude adapters).
-// ---------------------------------------------------------------------------
-
-interface StreamJsonEvent {
-  type?: string;
-  result?: unknown;
-  message?: { content?: Array<{ type?: string; text?: string }> };
-}
-
-/** Extract speakable text from a single claude stream-json line, or null. */
-function extractSpokenText(line: string): string | null {
-  let evt: StreamJsonEvent;
-  try {
-    evt = JSON.parse(line) as StreamJsonEvent;
-  } catch {
-    return null;
-  }
-  if (!evt || typeof evt !== "object") return null;
-  if (evt.type === "result" && typeof evt.result === "string" && evt.result.trim()) {
-    return evt.result.trim();
-  }
-  if (evt.type === "assistant" && Array.isArray(evt.message?.content)) {
-    const text = evt.message.content
-      .filter((b) => b?.type === "text" && typeof b.text === "string")
-      .map((b) => b.text as string)
-      .join(" ")
-      .trim();
-    if (text) return text;
-  }
-  return null;
-}
-
-/**
- * Light markdown strip for TTS. The voice system prompt forbids markdown, but
- * agents occasionally leak it; reading "asterisk asterisk" aloud is worse than
- * a lossy strip.
- */
-function stripMarkdownForSpeech(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/`([^`]*)`/g, "$1")
-    .replace(/\*\*([^*]*)\*\*/g, "$1")
-    .replace(/\*([^*]*)\*/g, "$1")
-    .replace(/^#{1,6}\s+/gm, "")
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-async function fetchFinalAssistantText(runId: string): Promise<string> {
-  try {
-    const { content } = await heartbeatsApi.log(runId, 0, 256_000);
-    if (!content) return "";
-    const lines = content.split("\n");
-    let rawFallback = "";
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      let chunk: string | null = null;
-      try {
-        const parsed = JSON.parse(line) as { stream?: string; chunk?: string };
-        if (parsed.stream === "stdout" && parsed.chunk && parsed.chunk.trim()) {
-          chunk = parsed.chunk;
-        } else {
-          continue;
-        }
-      } catch {
-        // Plain-text log line (non-NDJSON adapters). Keep as a fallback only.
-        if (!rawFallback) rawFallback = line;
-        continue;
-      }
-      // A chunk may contain one or more stream-json lines; walk them backward.
-      const sublines = chunk.split("\n");
-      for (let j = sublines.length - 1; j >= 0; j--) {
-        const sub = sublines[j].trim();
-        if (!sub) continue;
-        const spoken = extractSpokenText(sub);
-        if (spoken) return stripMarkdownForSpeech(spoken);
-        // Non-stream-json stdout (plain-text adapters): remember the first
-        // (i.e. latest) raw text we see as a fallback. Gate on whether the
-        // subline parses as JSON (a stream-json event with no speakable text)
-        // rather than on its leading character, so plain-text replies that
-        // happen to start with "{" are not dropped.
-        if (!rawFallback) {
-          try {
-            JSON.parse(sub);
-          } catch {
-            rawFallback = sub;
-          }
-        }
-      }
-    }
-    return stripMarkdownForSpeech(rawFallback);
-  } catch {
-    return "";
+function phaseToStatusLabel(phase: Phase): string {
+  switch (phase) {
+    case "listening": return "Listening — speak when ready";
+    case "thinking":  return "Thinking…";
+    case "speaking":  return "Speaking";
+    case "muted":     return "Muted — tap mic to unmute";
+    case "error":     return "Error — see message below";
+    case "idle":
+    default:          return "Connecting…";
   }
 }
 
 // ---------------------------------------------------------------------------
-// VoiceMode page
+// VoiceMode
 // ---------------------------------------------------------------------------
 
 export function VoiceMode() {
   const { selectedCompanyId } = useCompany();
   const navigate = useNavigate();
 
-  const { state, dispatch } = useVoiceSessionMachine();
-  const tts = useStreamingTts();
-  const cues = useVoiceCues();
-
-  // `useStreamingTts` returns a fresh object every render. Mirror it into a
-  // ref so long-lived effects (notably the WS subscription) can read the
-  // latest `play`/`stop` without listing `tts` in their dep array, which
-  // would otherwise tear down + reconnect the socket on every render that
-  // flips `tts.isPlaying`.
-  const ttsRef = useRef(tts);
-  useEffect(() => {
-    ttsRef.current = tts;
-  }, [tts]);
-
-  // Track the active session + current turn IDs so the network code can
-  // dispatch the right events back into the machine without races.
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const sessionIdRef = useRef<string | null>(null);
-  const turnIdRef = useRef<string | null>(null);
-  const runIdRef = useRef<string | null>(null);
-
-  // ---- Per-turn streaming TTS state (Task 2 ada_v2 pattern) ---------------
-  // New instances are created for each turn so stale run log chunks from a
-  // prior run cannot enqueue into a new turn's queue. All three are reset
-  // together when the turn POST returns a runId.
-  const ttsQueueRef = useRef<TtsQueue | null>(null);
-  const deltaExtractorRef = useRef<DeltaExtractor | null>(null);
-  const sentenceBufferRef = useRef<SentenceBuffer | null>(null);
-  // Counts sentences enqueued this turn. Used to detect the zero-sentence
-  // fallback path and to know when to dispatch SERVER_THINKING_DONE.
-  const sentencesEnqueuedRef = useRef<number>(0);
-
-  // ---- Verbal ack (ada_v2 NON_BLOCKING pattern) --------------------------
-  // Pre-cached short phrases played the instant a turn POST succeeds so the
-  // user hears confirmation immediately rather than staring at a silent
-  // "thinking" state for 40+ seconds.
-  const ackAudioRef = useRef<HTMLAudioElement | null>(null);
-  const ackCacheRef = useRef<AckCache | null>(null);
-
+  // ------ UI state --------------------------------------------------------
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [turns, setTurns] = useState<VoiceTurn[]>([]);
-  const muted = state.phase === "muted";
-  const machinePhase = state.phase;
+  // isSpeaking drives the VoiceControls "stop" button highlight; fed by the
+  // audio frame sink's onActivity callback rather than derived from phase so
+  // it reflects actual playback, not just protocol messages.
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
-  // ---- Agent selection ---------------------------------------------------
-  // TODO(fre-968): Surface an agent picker. For v1 we prefer the hub agent
-  // (Conrad) so the voice persona matches the configured TTS voice; the
-  // agents list comes back in arbitrary order, so agents[0] was a different
-  // agent on every session (FRE-1296 field test: turns ran on Cortex/Hunter).
+  const muted = phase === "muted";
+
+  // ------ agent selection (prefer Conrad) --------------------------------
   const { data: agents } = useQuery({
     queryKey: selectedCompanyId
       ? queryKeys.agents.list(selectedCompanyId)
@@ -286,535 +81,242 @@ export function VoiceMode() {
     agents?.[0]?.id ??
     null;
 
-  // ---- Session lifecycle (create on mount, end on unmount) ---------------
+  // ------ audio playback element -----------------------------------------
+  // The audio element is the only playback surface; the frame sink writes
+  // MP3 blobs into it as object URLs. stopPlayback() hard-pauses in-flight
+  // audio for barge-in.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const play = useCallback(async (blob: Blob): Promise<void> => {
+    const el = audioRef.current;
+    if (!el) return;
+    const url = URL.createObjectURL(blob);
+    el.src = url;
+    try {
+      await el.play();
+      await new Promise<void>((resolve) => {
+        el.addEventListener("ended", () => resolve(), { once: true });
+        el.addEventListener("pause", () => resolve(), { once: true });
+      });
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }, []);
+
+  const stopPlayback = useCallback(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.pause();
+    el.src = "";
+  }, []);
+
+  // ------ audio frame sink (session-long, recreated on config change) ----
+  const sinkRef = useRef<ReturnType<typeof createAudioFrameSink> | null>(null);
+
   useEffect(() => {
-    if (!selectedCompanyId || !agentId) return;
-    let cancelled = false;
+    const sink = createAudioFrameSink({
+      play,
+      stopPlayback,
+      onActivity: setIsSpeaking,
+    });
+    sinkRef.current = sink;
+    // No cleanup: the sink does not hold DOM resources; the audio element
+    // teardown is handled by the element itself on unmount.
+  }, [play, stopPlayback]);
 
-    dispatch({ type: "START" });
+  // ------ server message handler (stable via ref in hook) ----------------
+  const handleServerMessage = useCallback((msg: ServerMessage) => {
+    switch (msg.type) {
+      case "ready":
+      case "resumed":
+        setPhase("listening");
+        setErrorMessage(null);
+        break;
 
-    (async () => {
-      try {
-        const res = await fetch("/api/voice/session", {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ companyId: selectedCompanyId, agentId }),
-        });
-        if (!res.ok) throw new Error(`session create failed: ${res.status}`);
-        const body = (await res.json()) as { sessionId: string };
-        if (cancelled) return;
-        sessionIdRef.current = body.sessionId;
-        setSessionId(body.sessionId);
-        // Build the ack cache and warm it in the background. warm() is
-        // best-effort - failures just mean next() returns null and no ack
-        // plays (not a hard error).
-        const cache = createAckCache((text) =>
-          pluginsApi
-            .bridgePerformAction(
-              VOICE_MODE_PLUGIN_ID,
-              "voice.speak",
-              { text, voiceId: KENN_VOICE_ID },
-              selectedCompanyId,
-            )
-            .then((res) => {
-              const r = res as { data: { audioBase64: string; mime: string } };
-              const b64 = r.data?.audioBase64 ?? "";
-              const mime = r.data?.mime ?? "audio/mpeg";
-              const bytes = base64ToBytes(b64);
-              return new Blob([bytes.buffer as ArrayBuffer], { type: mime });
-            }),
-        );
-        ackCacheRef.current = cache;
-        void cache.warm();
-      } catch (err) {
-        if (cancelled) return;
-        dispatch({
-          type: "ERROR",
-          message: err instanceof Error ? err.message : "session create failed",
-        });
-      }
-    })();
+      case "status":
+        // status.state is "listening" | "thinking" | "speaking" — all valid
+        // Phase values; cast is safe.
+        setPhase(msg.state as Phase);
+        break;
 
-    return () => {
-      cancelled = true;
-      ackAudioRef.current?.pause();
-      ackCacheRef.current?.dispose();
-      ackCacheRef.current = null;
-      const id = sessionIdRef.current;
-      if (id) {
-        // Fire-and-forget; the server endpoint is idempotent.
-        void fetch(`/api/voice/session/${encodeURIComponent(id)}`, {
-          method: "DELETE",
-          credentials: "include",
-        }).catch(() => {
-          // ignore - unmount cleanup
-        });
-      }
-    };
-  }, [selectedCompanyId, agentId, dispatch]);
-
-  // ---- VAD: capture speech, transcribe, post turn ------------------------
-  const handleSpeechEnd = useCallback(
-    async (audio: Float32Array) => {
-      const activeSession = sessionIdRef.current;
-      if (!activeSession || !agentId) return;
-      // Only accept speech while listening. Without this gate, a background
-      // noise blip during "thinking" replaced turnIdRef/runIdRef, so the
-      // in-flight run's "succeeded" event no longer matched and the reply was
-      // silently dropped (FRE-1296: 5 turns spawned in one minute, none
-      // spoken). Barge-in during "speaking" dispatches BARGE_IN first, which
-      // returns the machine to "listening" before speech-end fires.
-      if (state.phase !== "listening") return;
-
-      // Optimistically assign a turn id locally; the server's runId comes back
-      // afterwards and we attach it via runIdRef.
-      const localTurnId = crypto.randomUUID();
-      turnIdRef.current = localTurnId;
-
-      try {
-        const wav = encodeWav(audio, VAD_SAMPLE_RATE);
-        const audioBase64 = bytesToBase64(wav);
-        const transcribeRes = (await pluginsApi.bridgePerformAction(
-          VOICE_MODE_PLUGIN_ID,
-          "voice.transcribe",
-          { audioBase64, mime: "audio/wav" },
-          selectedCompanyId,
-        )) as { data: { transcript: string; audioId: string } };
-        const transcript = transcribeRes.data?.transcript?.trim();
-        if (!transcript) return;
-        // STT on a noise blip yields short filler ("you", "uh") - don't burn
-        // a full agent run on it.
-        if (transcript.length < 3) return;
-
-        setTurns((prev) => [
-          ...prev,
-          { id: `${localTurnId}-user`, role: "user", text: transcript },
-        ]);
-        // Audible confirmation that the user's speech was captured + transcribed.
-        // Fires only after a non-empty transcript so the cue actually corresponds
-        // to received input, not a discarded short utterance.
-        cues.playSpeechReceived();
-        dispatch({ type: "USER_SPEECH_END", turnId: localTurnId });
-
-        const turnRes = await fetch(
-          `/api/voice/session/${encodeURIComponent(activeSession)}/turn`,
-          {
-            method: "POST",
-            credentials: "include",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ transcript, agentId }),
-          },
-        );
-        if (!turnRes.ok) throw new Error(`turn post failed: ${turnRes.status}`);
-        const turnBody = (await turnRes.json()) as
-          | { runId: string }
-          | { status: "skipped" };
-        if ("runId" in turnBody) {
-          runIdRef.current = turnBody.runId;
-          // Create fresh per-turn streaming TTS instances so no stale run can
-          // enqueue into this turn's queue (ada_v2 per-turn staleness discipline).
-          const thisTurnId = localTurnId;
-          deltaExtractorRef.current = createDeltaExtractor();
-          sentenceBufferRef.current = splitIntoSentences();
-          sentencesEnqueuedRef.current = 0;
-          ttsQueueRef.current = createTtsQueue(
-            // speak: call voice.speak and return a Blob
-            (text: string) =>
-              pluginsApi
-                .bridgePerformAction(
-                  VOICE_MODE_PLUGIN_ID,
-                  "voice.speak",
-                  { text, voiceId: KENN_VOICE_ID },
-                  selectedCompanyId,
-                )
-                .then((res) => {
-                  const r = res as { data: { audioBase64: string; mime: string } };
-                  const b64 = r.data?.audioBase64 ?? "";
-                  const mime = r.data?.mime ?? "audio/mpeg";
-                  const bytes = base64ToBytes(b64);
-                  return new Blob([bytes.buffer as ArrayBuffer], { type: mime });
-                }),
-            // play: adapt Blob for useStreamingTts.play() and await full
-            // clip completion before returning. play() resolves when audio
-            // STARTS (not ends); without waitUntilDone(), the queue pump
-            // advances to the next sentence immediately and playBlob() calls
-            // audio.pause() mid-clip, cutting off the current sentence.
-            async (blob: Blob) => {
-              const arr = new Uint8Array(await blob.arrayBuffer());
-              // Pause the ack clip before real answer audio starts.
-              ackAudioRef.current?.pause();
-              await ttsRef.current.play(arr);
-              // Wait for the audio element to fire ended/pause before the
-              // queue advances - prevents sentence N from being cut off by
-              // sentence N+1's playBlob() calling audio.pause().
-              await ttsRef.current.waitUntilDone();
-            },
-            // onIdle: all sentences played - transition speaking -> listening
-            () => {
-              dispatch({ type: "TTS_END", turnId: thisTurnId });
-            },
-          );
-          // Play a pre-cached verbal ack so the user hears instant confirmation
-          // while the full 40s agent run runs in the background. Skip if the
-          // previous answer is still playing (don't talk over it). The ack
-          // must NOT change machine phase - it is not the answer.
-          if (!ttsRef.current.isPlaying) {
-            const ackUrl = ackCacheRef.current?.next() ?? null;
-            if (ackUrl && ackAudioRef.current) {
-              ackAudioRef.current.src = ackUrl;
-              ackAudioRef.current.play().catch(() => {});
-            }
-          }
-        } else {
-          // Wakeup was deduped - drop back to listening without a turn.
-          runIdRef.current = null;
-          dispatch({ type: "BARGE_IN" });
+      case "transcript":
+        if (msg.final) {
+          setTurns((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), role: msg.role, text: msg.text },
+          ]);
         }
-      } catch (err) {
-        dispatch({
-          type: "ERROR",
-          message: err instanceof Error ? err.message : "turn failed",
-        });
-      }
-    },
-    [agentId, dispatch, selectedCompanyId, state.phase, cues],
-  );
+        break;
 
-  const vad = useVad({
-    onSpeechEnd: handleSpeechEnd,
-    enabled: !!sessionId && machinePhase !== "muted" && machinePhase !== "error",
+      case "audio-start":
+        sinkRef.current?.onAudioStart(msg.seq);
+        break;
+
+      case "audio-end":
+        sinkRef.current?.onAudioEnd(msg.seq);
+        break;
+
+      case "interrupt":
+        sinkRef.current?.interrupt();
+        break;
+
+      case "run-dispatched":
+        // Nothing to do in the UI — gateway handles polling.
+        break;
+
+      case "run-complete":
+        // Gateway has already spoken the outcome; no UI action needed.
+        break;
+
+      case "error":
+        setPhase("error");
+        setErrorMessage(msg.message);
+        break;
+
+      case "superseded":
+        // Another session from this user replaced ours (e.g. second tab).
+        setPhase("idle");
+        break;
+    }
+  }, []);
+
+  const handleAudioFrame = useCallback((seq: number, bytes: Uint8Array) => {
+    sinkRef.current?.onAudioChunk(seq, bytes);
+  }, []);
+
+  const handleOpen = useCallback(() => {
+    // Socket opened (or reconnected). Gateway sends "ready"/"resumed"
+    // immediately after, which flips phase to "listening". Nothing to do here
+    // except ensure we're not stuck in error from a prior drop.
+    setPhase("idle");
+  }, []);
+
+  const handleClose = useCallback((reason: "superseded" | "error" | "normal") => {
+    if (reason === "error") {
+      setPhase("error");
+      setErrorMessage("Connection lost — reconnecting…");
+    } else if (reason === "superseded") {
+      setPhase("idle");
+    }
+    // "normal" means we closed it ourselves (handleEnd); no state change.
+  }, []);
+
+  // ------ socket ----------------------------------------------------------
+  const socketEnabled = !!selectedCompanyId && !!agentId;
+
+  const callbacks: GatewaySocketCallbacks = {
+    onServerMessage: handleServerMessage,
+    onAudioFrame: handleAudioFrame,
+    onOpen: handleOpen,
+    onClose: handleClose,
+  };
+
+  const { send, sendAudio } = useVoiceGatewaySocket({
+    companyId: selectedCompanyId ?? "",
+    agentId: agentId ?? "",
+    enabled: socketEnabled,
+    callbacks,
   });
 
-  // ---- WS: subscribe to run.* events for the active runId ----------------
-  useEffect(() => {
-    if (!selectedCompanyId) return;
-    let closed = false;
-    let reconnectTimer: number | null = null;
-    let socket: WebSocket | null = null;
+  // ------ mic → gateway --------------------------------------------------
+  // Mic capture is enabled only when the socket is up and the user is not
+  // muted/errored/idle. In those phases the gateway ignores audio anyway,
+  // but we also save getUserMedia CPU.
+  const micEnabled =
+    socketEnabled &&
+    phase !== "muted" &&
+    phase !== "error" &&
+    phase !== "idle";
 
-    const connect = () => {
-      if (closed) return;
-      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-      const url = `${protocol}://${window.location.host}/api/companies/${encodeURIComponent(selectedCompanyId)}/events/ws`;
-      socket = new WebSocket(url);
+  useMicPcmStream({
+    onChunk: sendAudio,
+    enabled: micEnabled,
+  });
 
-      socket.onmessage = async (msg) => {
-        const raw = typeof msg.data === "string" ? msg.data : "";
-        if (!raw) return;
-        let event: LiveEvent;
-        try {
-          event = JSON.parse(raw) as LiveEvent;
-        } catch {
-          return;
-        }
-        const payload = event.payload ?? {};
-        const runId = typeof payload["runId"] === "string" ? payload["runId"] : null;
-        const activeRunId = runIdRef.current;
-        const activeTurnId = turnIdRef.current;
-        if (!runId || runId !== activeRunId || !activeTurnId) return;
-
-        if (event.type === "heartbeat.run.log") {
-          // Stream log chunks into the delta extractor -> sentence buffer -> TTS queue.
-          const chunk = typeof payload["chunk"] === "string" ? payload["chunk"] : "";
-          if (chunk && deltaExtractorRef.current && sentenceBufferRef.current && ttsQueueRef.current) {
-            const deltas = deltaExtractorRef.current.push(chunk);
-            for (const delta of deltas) {
-              const sentences = sentenceBufferRef.current.push(delta);
-              for (const sentence of sentences) {
-                // First sentence: transition machine from thinking -> speaking.
-                if (sentencesEnqueuedRef.current === 0) {
-                  dispatch({ type: "SERVER_THINKING_DONE", turnId: activeTurnId });
-                }
-                sentencesEnqueuedRef.current += 1;
-                ttsQueueRef.current.enqueue(sentence);
-              }
-            }
-          }
-        } else if (event.type === "heartbeat.run.status") {
-          const status = typeof payload["status"] === "string" ? payload["status"] : "";
-          if (status === "succeeded") {
-            // Flush any tail in the sentence buffer and close the queue.
-            if (sentenceBufferRef.current && ttsQueueRef.current) {
-              const tail = sentenceBufferRef.current.flush();
-              for (const sentence of tail) {
-                if (sentencesEnqueuedRef.current === 0) {
-                  dispatch({ type: "SERVER_THINKING_DONE", turnId: activeTurnId });
-                }
-                sentencesEnqueuedRef.current += 1;
-                ttsQueueRef.current.enqueue(sentence);
-              }
-              if (sentencesEnqueuedRef.current > 0) {
-                // Streamed path: signal end of sentences; onIdle fires TTS_END.
-                ttsQueueRef.current.end();
-                // Fetch full text for the scrollback display (non-blocking).
-                void fetchFinalAssistantText(runId).then((text) => {
-                  if (text) {
-                    setTurns((prev) => [
-                      ...prev,
-                      { id: `${activeTurnId}-assistant`, role: "assistant", text },
-                    ]);
-                  }
-                });
-                return;
-              }
-            }
-            // Fallback: zero sentences streamed (tool-call-only run or extractor miss).
-            dispatch({ type: "SERVER_THINKING_DONE", turnId: activeTurnId });
-            const text = await fetchFinalAssistantText(runId);
-            if (text) {
-              setTurns((prev) => [
-                ...prev,
-                { id: `${activeTurnId}-assistant`, role: "assistant", text },
-              ]);
-              await playAssistantSpeech(text, activeTurnId);
-            } else {
-              // Nothing to speak - return to listening so the user can retry.
-              dispatch({ type: "TTS_END", turnId: activeTurnId });
-            }
-          } else if (
-            status === "failed" ||
-            status === "timed_out" ||
-            status === "cancelled"
-          ) {
-            // drain() before stop() so the pump cannot start a new clip in the
-            // gap between stop() clearing isPlaying and drain() sealing the queue.
-            ttsQueueRef.current?.drain();
-            tts.stop();
-            dispatch({ type: "ERROR", message: `run ${status}` });
-          }
-        }
-      };
-
-      socket.onerror = () => socket?.close();
-      socket.onclose = () => {
-        if (closed) return;
-        reconnectTimer = window.setTimeout(connect, 1500);
-      };
-    };
-
-    const playAssistantSpeech = async (text: string, turnId: string) => {
-      try {
-        const speakRes = (await pluginsApi.bridgePerformAction(
-          VOICE_MODE_PLUGIN_ID,
-          "voice.speak",
-          { text, voiceId: KENN_VOICE_ID },
-          selectedCompanyId,
-        )) as { data: { audioBase64: string; mime: string } };
-        const audioBase64 = speakRes.data?.audioBase64;
-        if (!audioBase64) {
-          dispatch({ type: "TTS_END", turnId });
-          return;
-        }
-        const bytes = base64ToBytes(audioBase64);
-        // Pause the ack clip before real answer audio starts so they don't overlap.
-        ackAudioRef.current?.pause();
-        await ttsRef.current.play(bytes);
-        // Heuristic: play() resolves once playback starts. Listen for ended
-        // via the isPlaying signal in a separate effect below.
-      } catch (err) {
-        dispatch({
-          type: "ERROR",
-          message: err instanceof Error ? err.message : "tts failed",
-        });
-      }
-    };
-
-    connect();
-
-    return () => {
-      closed = true;
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      if (socket) {
-        socket.onmessage = null;
-        socket.onerror = null;
-        socket.onclose = null;
-        if (socket.readyState === WebSocket.OPEN) socket.close(1000, "voice_mode_unmount");
-      }
-    };
-  }, [selectedCompanyId, dispatch]);
-
-  // ---- Mic-open cue: fire a soft tone the first time we enter `listening`
-  // and on every transition back into `listening` (after thinking/speaking/
-  // unmute). Tracks the previous phase in a ref so we play only on the edge,
-  // not every render that sees phase === "listening".
-  const prevPhaseRef = useRef<typeof state.phase | null>(null);
-  useEffect(() => {
-    const prev = prevPhaseRef.current;
-    prevPhaseRef.current = state.phase;
-    if (state.phase === "listening" && prev !== "listening") {
-      cues.playMicOpen();
-    }
-  }, [state.phase, cues]);
-
-  // ---- TTS end watcher: when isPlaying flips false during speaking, end turn.
-  // Streamed turns (sentencesEnqueuedRef.current > 0) are ended exclusively by
-  // the sentence queue's onIdle callback. isPlaying flickers false between every
-  // pair of sentences in the streamed path (playBlob pauses before starting the
-  // next clip), so it cannot signal end-of-answer there - only onIdle can.
-  const wasPlayingRef = useRef(false);
-  useEffect(() => {
-    const wasPlaying = wasPlayingRef.current;
-    wasPlayingRef.current = tts.isPlaying;
-    if (
-      wasPlaying &&
-      !tts.isPlaying &&
-      state.phase === "speaking" &&
-      sentencesEnqueuedRef.current === 0
-    ) {
-      dispatch({ type: "TTS_END", turnId: state.turnId });
-    }
-  }, [tts.isPlaying, state, dispatch]);
-
-  // ---- Barge-in: VAD detects user speech while assistant is speaking ----
-  useEffect(() => {
-    if (vad.state === "speaking" && state.phase === "speaking") {
-      ackAudioRef.current?.pause();
-      tts.stop();
-      // Drain the sentence queue so pending/future sentences don't play.
-      ttsQueueRef.current?.drain();
-      dispatch({ type: "BARGE_IN" });
-    }
-  }, [vad.state, state.phase, tts, dispatch]);
-
-  // ---- Mute side-effect: pause/resume VAD ------------------------------
-  useEffect(() => {
-    if (state.phase === "muted") {
-      vad.pause();
-    } else {
-      vad.resume();
-    }
-    // vad is a stable ref-backed object; we only want phase as a trigger.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.phase]);
-
-  // ---- Controls handlers ----------------------------------------------
+  // ------ controls -------------------------------------------------------
   const handleEnd = useCallback(() => {
-    const id = sessionIdRef.current;
-    sessionIdRef.current = null;
-    setSessionId(null);
-    dispatch({ type: "STOP" });
-    tts.stop();
-    if (id) {
-      void fetch(`/api/voice/session/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        credentials: "include",
-      }).catch(() => {
-        // ignore
-      });
-    }
+    send({ type: "end" });
+    stopPlayback();
+    sinkRef.current?.interrupt();
     navigate("/dashboard");
-  }, [dispatch, navigate, tts]);
+  }, [send, stopPlayback, navigate]);
 
   const handleToggleMute = useCallback(() => {
-    if (state.phase === "muted") dispatch({ type: "UNMUTE" });
-    else dispatch({ type: "MUTE" });
-  }, [state.phase, dispatch]);
+    if (phase === "muted") {
+      send({ type: "unmute" });
+      setPhase("listening");
+    } else {
+      send({ type: "mute" });
+      setPhase("muted");
+    }
+  }, [phase, send]);
 
   const handleStop = useCallback(() => {
-    ackAudioRef.current?.pause();
-    tts.stop();
-    ttsQueueRef.current?.drain();
-    if (state.phase === "speaking") {
-      dispatch({ type: "BARGE_IN" });
-    }
-  }, [tts, state.phase, dispatch]);
+    // Barge-in: hard-stop current audio and restart mic listening.
+    stopPlayback();
+    sinkRef.current?.interrupt();
+  }, [stopPlayback]);
 
-  // While the VAD is still downloading / initialising ONNX and requesting
-  // mic permission, keep the orb dim (idle) and show "Loading mic…" so Dom
-  // doesn't stare at a pulsing "Listening" orb that can't hear him yet.
-  const vadLoading = vad.state === "loading";
-  const orbPhase = (machinePhase === "listening" && vadLoading)
-    ? ("idle" as const)
-    : machinePhaseToOrb(machinePhase);
-  const statusLabel = (machinePhase === "listening" && vadLoading)
-    ? "Loading mic…"
-    : phaseToStatusLabel(machinePhase);
+  // ------ render ---------------------------------------------------------
+  const statusLabel = phaseToStatusLabel(phase);
 
   return (
     <div
       className="flex h-dvh flex-col bg-background text-foreground"
       data-testid="voice-mode-page"
     >
-      {/* Hidden audio element for pre-cached verbal acks ("On it." etc.).
-          Must NOT route through useStreamingTts so acks never interleave
-          with answer audio. The ref is managed in handleSpeechEnd / paused
-          in three places: answer start, barge-in, and STOP. */}
-      <audio ref={ackAudioRef} aria-hidden="true" />
+      {/* Single playback element for all server-synthesized TTS audio. */}
+      <audio ref={audioRef} aria-hidden="true" />
+
       <VoiceControls
         muted={muted}
-        isSpeaking={tts.isPlaying}
+        isSpeaking={isSpeaking}
         onEnd={handleEnd}
         onToggleMute={handleToggleMute}
         onStop={handleStop}
         className="border-b border-border"
       />
 
-      {/* Orb takes the bulk of the viewport, vertically + horizontally
-          centered. Larger size + centered position per Dom's request — the
-          orb is the primary surface; transcript and controls are secondary. */}
       <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4">
         <VoicePoweredOrb
-          phase={orbPhase}
-          getLevel={tts.getLevel}
+          phase={phase}
           className="h-72 w-72 sm:h-80 sm:w-80"
         />
 
-        {/* Mic-ready indicator. Shows a pulsing dot + readable phase label so
-            the user always knows whether the mic is hot. The dot turns muted
-            when muted/error so the colour change reinforces the label. */}
         <div
           className="flex items-center gap-2 text-sm text-muted-foreground"
           data-testid="voice-mode-status"
-          data-phase={machinePhase}
+          data-phase={phase}
         >
           <span
             aria-hidden="true"
             className={cn(
               "inline-block h-2 w-2 rounded-full",
-              machinePhase === "listening" && !vadLoading && "animate-pulse bg-emerald-500",
-              machinePhase === "listening" && vadLoading && "animate-pulse bg-muted-foreground/40",
-              machinePhase === "thinking" && "animate-pulse bg-amber-500",
-              machinePhase === "speaking" && "bg-sky-500",
-              machinePhase === "muted" && "bg-muted-foreground/60",
-              machinePhase === "error" && "bg-destructive",
-              machinePhase === "idle" && "bg-muted-foreground/40",
+              phase === "listening" && "animate-pulse bg-emerald-500",
+              phase === "thinking"  && "animate-pulse bg-amber-500",
+              phase === "speaking"  && "bg-sky-500",
+              phase === "muted"     && "bg-muted-foreground/60",
+              phase === "error"     && "bg-destructive",
+              phase === "idle"      && "bg-muted-foreground/40",
             )}
           />
           <span>{statusLabel}</span>
         </div>
       </div>
 
-      <VoiceScrollback turns={turns} className="max-h-40 shrink-0 border-t border-border" />
+      <VoiceScrollback
+        turns={turns}
+        className="max-h-40 shrink-0 border-t border-border"
+      />
 
-      {state.phase === "error" ? (
+      {phase === "error" && errorMessage ? (
         <div
           className="px-4 pb-4 text-center text-xs text-destructive"
           data-testid="voice-mode-error"
         >
-          {state.message}
+          {errorMessage}
         </div>
       ) : null}
     </div>
   );
 }
-
-function phaseToStatusLabel(phase: "idle" | "listening" | "thinking" | "speaking" | "muted" | "error"): string {
-  switch (phase) {
-    case "listening":
-      return "Listening — speak when ready";
-    case "thinking":
-      return "Thinking…";
-    case "speaking":
-      return "Speaking";
-    case "muted":
-      return "Muted — tap mic to unmute";
-    case "error":
-      return "Error — see message below";
-    case "idle":
-    default:
-      return "Connecting…";
-  }
-}
-
-export default VoiceMode;
