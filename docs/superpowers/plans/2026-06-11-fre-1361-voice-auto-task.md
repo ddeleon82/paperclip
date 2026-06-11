@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When Dom makes an actionable request by voice, the gateway creates a Paperclip board issue, dispatches Conrad against it, speaks the identifier back, and the voice UI shows a visible activity card until the run completes.
+**Goal:** When Dom makes an actionable request by voice, the gateway creates a Paperclip board issue, dispatches Conrad against it, speaks the identifier back, and the existing voice orb shifts color and gains motion while the run is active (Dom's explicit minimal-UI directive, see Chunk 3).
 
-**Architecture:** One new gateway tool, `create_task`, that creates a board issue via the server's existing issue-creation path and then dispatches a Conrad run referencing it (single tool call per turn for Gemini). One new client protocol message, `task-created`, emitted alongside the existing `run-dispatched`. The voice UI renders an activity card keyed by runId, resolved by the existing `run-complete` message. Prompt gains a create-vs-dispatch decision rule.
+**Architecture:** One new gateway tool, `create_task`, that creates a board issue via the server's existing issue-creation path and then dispatches a Conrad run referencing it (single tool call per turn for Gemini). One new client protocol message, `task-created`, emitted alongside the existing `run-dispatched`. The voice UI derives a "working" display phase from active runIds and feeds it to the existing VoicePoweredOrb, resolved by the existing `run-complete` message. Prompt gains a create-vs-dispatch decision rule.
 
 **Tech Stack:** TypeScript, vitest, drizzle, React (ui/), existing voice-gateway module layout on branch feat/voice-mode-tab.
 
@@ -109,23 +109,27 @@ Never create more than one task per user request.
 - [ ] **Step 4: Run prompt tests, verify PASS.**
 - [ ] **Step 5: Commit** `feat(voice-gateway): prompt rule for create_task vs dispatch (FRE-1361)`.
 
-## Chunk 3: UI activity card
+## Chunk 3: UI working state via orb
 
-### Task 5: voice UI activity card
+**Scope directive from Dom (FRE-1296 comment 5a191132, 2026-06-11):** NO activity card. "Ideal solution is minimal ui-a color change in the existing ring animation and new motion to show its working before Conrad answers." The orb is `ui/src/components/voice/VoicePoweredOrb.tsx`; its per-phase visuals live in the `PHASE_TO_TARGETS` map (hover = surface motion, rotation = spin speed, hueOffset = color shift in degrees). Phase comes from `VoiceMode.tsx` state (`Phase` union at line 38, status label fn at line 40, status dot classes ~line 292).
+
+### Task 5: orb "working" state
 
 **Files:**
-- Modify: `ui/src/pages/VoiceMode.tsx`, `ui/src/hooks/useVoiceGatewaySocket.ts` (only if the message type union lives there)
-- Test: colocated UI test per existing ui/ test conventions (mirror existing VoiceMode tests if present; otherwise add `ui/src/pages/__tests__/VoiceMode.activity.test.tsx`)
+- Modify: `ui/src/components/voice/VoicePoweredOrb.tsx`, `ui/src/pages/VoiceMode.tsx`
+- Test: extend `ui/src/pages/VoiceMode.test.tsx` (existing test file; follow its harness/mocks)
 
-- [ ] **Step 1: Write failing test:** receiving `task-created` renders a card with the identifier, title, and a working indicator; `run-dispatched` without a preceding task-created renders a generic "Conrad is working" card; `run-complete { ok: true }` flips the matching card (keyed by runId) to a done state and auto-removes it after a short delay; `ok: false` shows a failed state that persists.
+- [ ] **Step 1: Write failing tests:** (a) after a `run-dispatched` message, the orb element (`data-testid="voice-orb"`) has `data-phase="working"` and the status label reads "Conrad is working on it"; (b) the working state holds while server `status` messages report listening or thinking, but `status: speaking` shows "speaking" (speaking wins over working); (c) after `run-complete` for the only active runId, the orb returns to the underlying machine phase; (d) two dispatched runs: completing one keeps working, completing both clears it.
 - [ ] **Step 2: Run, verify FAIL.**
-- [ ] **Step 3: Implement.** Local state `activeRuns: Map<runId, { identifier?, title?, status: "working" | "done" | "failed" }>` updated in the message switch (lines 157-173 area). Render cards in the existing layout, styled consistently with the page (check surrounding components for design tokens). Keep it dependency-free.
+- [ ] **Step 3: Implement.**
+  - VoicePoweredOrb.tsx: add `"working"` to the MutablePhase union and PHASE_TO_TARGETS: `working: { hover: 0.3, rotation: 1.6, hueOffset: 60 }` (distinct color shift plus faster spin and visible surface motion = new motion while Conrad works; values may be tuned but must differ clearly from idle, thinking, and speaking).
+  - VoiceMode.tsx: keep the machine `phase` state untouched; add `activeRunIds: Set<string>` updated in the message switch (`run-dispatched` and `task-created` add, `run-complete` deletes). Derive `displayPhase = activeRunIds.size > 0 && (phase === "idle" || phase === "listening" || phase === "thinking") ? "working" : phase` and pass it to VoicePoweredOrb, phaseToStatusLabel, and the status dot. Add label case "Conrad is working on it" and a status dot class (e.g. `animate-pulse bg-violet-500`) for working. No new components, no card.
 - [ ] **Step 4: Run UI tests, verify PASS.**
-- [ ] **Step 5: Commit** `feat(voice-ui): live activity card for voice-dispatched runs (FRE-1361)`.
+- [ ] **Step 5: Commit** `feat(voice-ui): orb working state while a dispatched run is active (FRE-1361)`.
 
 ### Task 6: verification + field handoff
 
 - [ ] **Step 1:** Full suites: server `npx -y pnpm@9.15.4 exec vitest run src/__tests__/ --reporter=dot` (voice files all green, no regressions) and `npx -y pnpm@9.15.4 exec tsc --noEmit`; ui test + typecheck per ui/ package scripts.
 - [ ] **Step 2:** Rebuild UI into server/ui-dist using the repo's existing prepare:ui-dist flow, preserving /vad assets (see commit afef3cb7 for the clobber regression to avoid).
 - [ ] **Step 3:** Commit any ui-dist artifacts per repo convention.
-- [ ] **Step 4:** Comment on FRE-1361 for Dom: what shipped, that it needs `pm2 restart paperclip` (his action, never ours) plus a browser hard refresh, and a 3-line acceptance script (speak an actionable request, see the card appear with an FRE identifier, hear the identifier spoken).
+- [ ] **Step 4:** Comment on FRE-1361 for Dom: what shipped, that it needs `pm2 restart paperclip` (his action, never ours) plus a browser hard refresh, and a 3-line acceptance script (speak an actionable request, hear the FRE identifier spoken, watch the orb shift color and motion until Conrad answers, new issue visible on the board).
