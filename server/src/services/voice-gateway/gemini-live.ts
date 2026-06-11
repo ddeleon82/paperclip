@@ -56,14 +56,19 @@ export function mapServerMessage(raw: LiveServerMessage): LiveServerEvent {
 
   const sc = raw.serverContent;
   if (sc) {
-    // textDelta: concatenate all text parts from modelTurn
-    if (sc.modelTurn?.parts) {
-      const textParts = sc.modelTurn.parts
-        .map((p) => (typeof (p as { text?: string }).text === "string" ? (p as { text: string }).text : ""))
-        .filter((t) => t.length > 0);
-      if (textParts.length > 0) {
-        evt.textDelta = textParts.join("");
-      }
+    // textDelta: concatenate all text parts from modelTurn, plus output
+    // transcription text. Live models (June 2026) only support the AUDIO
+    // response modality, so in cascade mode assistant text arrives via
+    // outputAudioTranscription rather than modelTurn text parts.
+    const textParts = (sc.modelTurn?.parts ?? [])
+      .map((p) => (typeof (p as { text?: string }).text === "string" ? (p as { text: string }).text : ""))
+      .filter((t) => t.length > 0);
+    const transcriptionText = sc.outputTranscription?.text ?? "";
+    if (transcriptionText.length > 0) {
+      textParts.push(transcriptionText);
+    }
+    if (textParts.length > 0) {
+      evt.textDelta = textParts.join("");
     }
 
     // audioDelta: first inlineData part (base64 -> Uint8Array)
@@ -117,8 +122,12 @@ export function mapServerMessage(raw: LiveServerMessage): LiveServerEvent {
  *
  * @param cfg.apiKey   - Gemini API key.
  * @param cfg.model    - Live model ID (e.g. "gemini-live-2.5-flash-preview").
- * @param cfg.output   - "cascade" uses TEXT modality (audio produced downstream by
- *                       ElevenLabs); "native" uses AUDIO modality directly.
+ * @param cfg.output   - Both modes use AUDIO modality (live models no longer
+ *                       support TEXT). "cascade" additionally requests output
+ *                       audio transcription; the transcription text drives the
+ *                       ElevenLabs pipeline downstream and Gemini's own audio
+ *                       is dropped by the session. "native" forwards Gemini's
+ *                       audio directly.
  */
 export function createGeminiLiveClient(cfg: {
   apiKey: string;
@@ -129,8 +138,9 @@ export function createGeminiLiveClient(cfg: {
 
   return {
     async connect(opts) {
-      const responseModalities: Modality[] =
-        cfg.output === "native" ? [Modality.AUDIO] : [Modality.TEXT];
+      // Live models only support AUDIO. Cascade mode gets assistant text via
+      // output transcription (verified against gemini-3.1-flash-live-preview).
+      const responseModalities: Modality[] = [Modality.AUDIO];
 
       // Build the tools array in the shape the SDK expects: { functionDeclarations }
       const sdkTools =
@@ -152,6 +162,7 @@ export function createGeminiLiveClient(cfg: {
           responseModalities,
           systemInstruction: opts.systemInstruction,
           inputAudioTranscription: {},
+          ...(cfg.output === "cascade" ? { outputAudioTranscription: {} } : {}),
           ...(sdkTools ? { tools: sdkTools as Parameters<typeof ai.live.connect>[0]["config"] extends { tools?: infer T } ? T : never } : {}),
         },
         callbacks: {

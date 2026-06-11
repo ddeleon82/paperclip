@@ -49,6 +49,39 @@ describe("mapServerMessage - textDelta", () => {
     const evt = mapServerMessage(raw);
     expect(evt.textDelta).toBeUndefined();
   });
+
+  // Live models (June 2026) only support AUDIO response modality; in cascade
+  // mode assistant text arrives via outputTranscription, not modelTurn parts.
+  it("extracts text delta from outputTranscription", () => {
+    const raw = makeMsg({
+      serverContent: {
+        outputTranscription: { text: "Voice gateway smoke test passed." },
+      } as LiveServerMessage["serverContent"],
+    });
+    const evt = mapServerMessage(raw);
+    expect(evt.textDelta).toBe("Voice gateway smoke test passed.");
+  });
+
+  it("concatenates modelTurn text parts and outputTranscription text", () => {
+    const raw = makeMsg({
+      serverContent: {
+        modelTurn: { parts: [{ text: "Foo" }] },
+        outputTranscription: { text: " bar" },
+      } as LiveServerMessage["serverContent"],
+    });
+    const evt = mapServerMessage(raw);
+    expect(evt.textDelta).toBe("Foo bar");
+  });
+
+  it("returns undefined textDelta when outputTranscription text is empty", () => {
+    const raw = makeMsg({
+      serverContent: {
+        outputTranscription: { text: "" },
+      } as LiveServerMessage["serverContent"],
+    });
+    const evt = mapServerMessage(raw);
+    expect(evt.textDelta).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
