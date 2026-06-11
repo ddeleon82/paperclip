@@ -138,7 +138,7 @@ export function createAudioFrameSink(opts: {
       const slot = pending.get(seq);
       if (!slot) return; // dropped by interrupt()
       pending.delete(seq);
-      const blob = new Blob(slot.chunks, { type: "audio/mpeg" });
+      const blob = new Blob(slot.chunks as BlobPart[], { type: "audio/mpeg" });
       slot.resolve(blob);
     },
 

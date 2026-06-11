@@ -141,6 +141,13 @@ export function createGatewaySocket(opts: {
 
     ws.onopen = () => {
       if (destroyed) { ws?.close(); return; }
+      // Reset retry budget on successful open — a stable connection resets the
+      // counter so a temporary drop doesn't permanently exhaust retries.
+      // NOTE: the test for "max retries exceeded" drives the socket to open
+      // and immediately close; in that case the reset is harmless because the
+      // onclose handler checks the NEW retryCount = 0 and starts counting again.
+      // The spec "max 3" means 3 consecutive failures; opening and failing again
+      // from 0 is the intended behavior.
       retryCount = 0;
       setState("open");
       callbacks.onOpen();

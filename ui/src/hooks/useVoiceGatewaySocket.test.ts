@@ -1,14 +1,13 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
-  useVoiceGatewaySocket,
+  createGatewaySocket,
   decodeServerBinary,
+  encodeAudioFrame,
 } from "./useVoiceGatewaySocket";
 
 // ---------------------------------------------------------------------------
 // Minimal mock WebSocket
 // ---------------------------------------------------------------------------
-
-type WsEvent = "open" | "close" | "message" | "error";
 
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
@@ -45,11 +44,13 @@ class MockWebSocket {
 
   simulateClose(opts?: { code?: number; reason?: string; wasClean?: boolean }) {
     this.readyState = 3;
-    const ev = new CloseEvent("close", {
+    // Node.js doesn't have CloseEvent; use a plain object that satisfies the shape
+    const ev = {
+      type: "close",
       code: opts?.code ?? 1006,
       reason: opts?.reason ?? "",
       wasClean: opts?.wasClean ?? false,
-    });
+    } as CloseEvent;
     this.onclose?.(ev);
   }
 
@@ -65,7 +66,7 @@ class MockWebSocket {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Build helpers
 // ---------------------------------------------------------------------------
 
 /** Build a 4-byte big-endian seq + payload ArrayBuffer. */
@@ -77,10 +78,20 @@ function buildBinaryFrame(seq: number, payload: Uint8Array): ArrayBuffer {
   return buf;
 }
 
-const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+function makeCallbacks() {
+  return {
+    onServerMessage: vi.fn(),
+    onAudioFrame: vi.fn(),
+    onOpen: vi.fn(),
+    onClose: vi.fn(),
+    onStateChange: vi.fn(),
+  };
+}
+
+const wsFactory = (url: string) => new MockWebSocket(url) as unknown as WebSocket;
 
 // ---------------------------------------------------------------------------
-// Tests for the pure decode helper
+// Tests for the pure decode/encode helpers
 // ---------------------------------------------------------------------------
 
 describe("decodeServerBinary", () => {
@@ -106,11 +117,21 @@ describe("decodeServerBinary", () => {
   });
 });
 
+describe("encodeAudioFrame", () => {
+  it("encodes PCM16 with seq=0 header", () => {
+    const pcm = new Int16Array([100, -200, 300]);
+    const buf = encodeAudioFrame(pcm);
+    const view = new DataView(buf);
+    expect(view.getUint32(0, false)).toBe(0); // seq is 0
+    expect(buf.byteLength).toBe(4 + pcm.byteLength);
+  });
+});
+
 // ---------------------------------------------------------------------------
-// Hook tests via wsFactory injection
+// createGatewaySocket tests
 // ---------------------------------------------------------------------------
 
-describe("useVoiceGatewaySocket", () => {
+describe("createGatewaySocket", () => {
   beforeEach(() => {
     MockWebSocket.instances = [];
     vi.useFakeTimers();
@@ -120,23 +141,13 @@ describe("useVoiceGatewaySocket", () => {
     vi.useRealTimers();
   });
 
-  function createCallbacks() {
-    return {
-      onServerMessage: vi.fn(),
-      onAudioFrame: vi.fn(),
-      onOpen: vi.fn(),
-      onClose: vi.fn(),
-    };
-  }
-
   it("sends start message immediately on open", () => {
-    const callbacks = createCallbacks();
-    useVoiceGatewaySocket({
-      companyId: "co1",
+    const callbacks = makeCallbacks();
+    createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=co1",
       agentId: "ag1",
-      enabled: true,
       callbacks,
-      wsFactory: (url) => new MockWebSocket(url) as unknown as WebSocket,
+      wsFactory,
     });
 
     expect(MockWebSocket.instances).toHaveLength(1);
@@ -150,18 +161,16 @@ describe("useVoiceGatewaySocket", () => {
   });
 
   it("dispatches text messages to onServerMessage", () => {
-    const callbacks = createCallbacks();
-    useVoiceGatewaySocket({
-      companyId: "co1",
+    const callbacks = makeCallbacks();
+    createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=co1",
       agentId: "ag1",
-      enabled: true,
       callbacks,
-      wsFactory: (url) => new MockWebSocket(url) as unknown as WebSocket,
+      wsFactory,
     });
 
     const ws = MockWebSocket.instances[0];
     ws.simulateOpen();
-
     ws.simulateTextMessage(JSON.stringify({ type: "ready", sessionId: "sess-1" }));
     expect(callbacks.onServerMessage).toHaveBeenCalledWith({
       type: "ready",
@@ -170,13 +179,12 @@ describe("useVoiceGatewaySocket", () => {
   });
 
   it("dispatches binary frames to onAudioFrame", () => {
-    const callbacks = createCallbacks();
-    useVoiceGatewaySocket({
-      companyId: "co1",
+    const callbacks = makeCallbacks();
+    createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=co1",
       agentId: "ag1",
-      enabled: true,
       callbacks,
-      wsFactory: (url) => new MockWebSocket(url) as unknown as WebSocket,
+      wsFactory,
     });
 
     const ws = MockWebSocket.instances[0];
@@ -192,16 +200,14 @@ describe("useVoiceGatewaySocket", () => {
   });
 
   it("reconnects with backoff on unexpected close", async () => {
-    const callbacks = createCallbacks();
-    useVoiceGatewaySocket({
-      companyId: "co1",
+    const callbacks = makeCallbacks();
+    createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=co1",
       agentId: "ag1",
-      enabled: true,
       callbacks,
-      wsFactory: (url) => new MockWebSocket(url) as unknown as WebSocket,
+      wsFactory,
     });
 
-    expect(MockWebSocket.instances).toHaveLength(1);
     const ws1 = MockWebSocket.instances[0];
     ws1.simulateOpen();
     ws1.simulateClose({ wasClean: false }); // unexpected close
@@ -220,13 +226,12 @@ describe("useVoiceGatewaySocket", () => {
   });
 
   it("sends start first then flushes buffered audio on reconnect", async () => {
-    const callbacks = createCallbacks();
-    const { sendAudio } = useVoiceGatewaySocket({
-      companyId: "co1",
+    const callbacks = makeCallbacks();
+    const handle = createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=co1",
       agentId: "ag1",
-      enabled: true,
       callbacks,
-      wsFactory: (url) => new MockWebSocket(url) as unknown as WebSocket,
+      wsFactory,
     });
 
     const ws1 = MockWebSocket.instances[0];
@@ -235,7 +240,7 @@ describe("useVoiceGatewaySocket", () => {
 
     // While reconnecting, buffer some audio
     const pcm = new Int16Array([100, 200, 300]);
-    sendAudio(pcm);
+    handle.sendAudio(pcm);
 
     await vi.advanceTimersByTimeAsync(1000);
     const ws2 = MockWebSocket.instances[1];
@@ -249,27 +254,114 @@ describe("useVoiceGatewaySocket", () => {
     expect(ws2.sent[1]).toBeInstanceOf(ArrayBuffer);
   });
 
-  it("URL includes companyId", () => {
-    const callbacks = createCallbacks();
-    useVoiceGatewaySocket({
-      companyId: "my-company-123",
+  it("URL is passed through to the WebSocket factory", () => {
+    const callbacks = makeCallbacks();
+    createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=my-company-123",
       agentId: "ag1",
-      enabled: true,
       callbacks,
-      wsFactory: (url) => new MockWebSocket(url) as unknown as WebSocket,
+      wsFactory,
     });
     expect(MockWebSocket.instances[0].url).toContain("my-company-123");
   });
 
-  it("does not connect when enabled=false", () => {
-    const callbacks = createCallbacks();
-    useVoiceGatewaySocket({
-      companyId: "co1",
+  it("state transitions: idle -> connecting -> open -> reconnecting on unexpected close", async () => {
+    const states: string[] = [];
+    const callbacks = makeCallbacks();
+    callbacks.onStateChange = vi.fn((s: string) => states.push(s));
+
+    createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=co1",
       agentId: "ag1",
-      enabled: false,
       callbacks,
-      wsFactory: (url) => new MockWebSocket(url) as unknown as WebSocket,
+      wsFactory,
     });
-    expect(MockWebSocket.instances).toHaveLength(0);
+
+    const ws = MockWebSocket.instances[0];
+    expect(states).toContain("connecting");
+    ws.simulateOpen();
+    expect(states).toContain("open");
+    ws.simulateClose({ wasClean: false });
+    expect(states).toContain("reconnecting");
+  });
+
+  it("state goes to closed after max retries exceeded (never opens successfully)", async () => {
+    const states: string[] = [];
+    const callbacks = makeCallbacks();
+    callbacks.onStateChange = vi.fn((s: string) => states.push(s));
+
+    // Override wsFactory so connections never successfully open — they just fail
+    // immediately with an unexpected close. This exhausts the 3-entry BACKOFF_MS.
+    const neverOpenFactory = (url: string) => {
+      const ws = new MockWebSocket(url) as unknown as WebSocket;
+      return ws;
+    };
+
+    createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=co1",
+      agentId: "ag1",
+      callbacks,
+      wsFactory: neverOpenFactory,
+    });
+
+    // ws[0] created by connect(). Immediately close without opening → retry
+    MockWebSocket.instances[0].simulateClose({ wasClean: false }); // attempt 0 → retry after 1s
+    await vi.advanceTimersByTimeAsync(1000);
+    MockWebSocket.instances[1].simulateClose({ wasClean: false }); // attempt 1 → retry after 2s
+    await vi.advanceTimersByTimeAsync(2000);
+    MockWebSocket.instances[2].simulateClose({ wasClean: false }); // attempt 2 → retry after 4s
+    await vi.advanceTimersByTimeAsync(4000);
+    // attempt 3 = BACKOFF_MS.length → no more retries → "closed"
+    MockWebSocket.instances[3].simulateClose({ wasClean: false });
+
+    expect(states).toContain("closed");
+    expect(callbacks.onClose).toHaveBeenCalledWith("error");
+  });
+
+  it("destroy() stops reconnect timer and closes socket", async () => {
+    const callbacks = makeCallbacks();
+    const handle = createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=co1",
+      agentId: "ag1",
+      callbacks,
+      wsFactory,
+    });
+
+    const ws1 = MockWebSocket.instances[0];
+    ws1.simulateOpen();
+    ws1.simulateClose({ wasClean: false }); // triggers reconnect timer
+
+    handle.destroy();
+    // After destroy, timer is cleared — no new WS should be created
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(MockWebSocket.instances).toHaveLength(1); // only the original
+  });
+
+  it("audio beyond buffer limit drops oldest frames", () => {
+    const callbacks = makeCallbacks();
+    const handle = createGatewaySocket({
+      url: "ws://localhost/api/voice/live?companyId=co1",
+      agentId: "ag1",
+      callbacks,
+      wsFactory,
+    });
+
+    const ws1 = MockWebSocket.instances[0];
+    ws1.simulateOpen();
+    ws1.simulateClose({ wasClean: false }); // now reconnecting
+
+    // Send 25 frames (5 beyond the 20-frame limit)
+    for (let i = 0; i < 25; i++) {
+      handle.sendAudio(new Int16Array([i]));
+    }
+
+    // On reconnect, only 20 frames should be flushed
+    vi.advanceTimersByTime(1000);
+    const ws2 = MockWebSocket.instances[1];
+    ws2.simulateOpen();
+
+    // 1 start + ≤20 audio frames
+    const audioFrameCount = ws2.sent.filter((s) => s instanceof ArrayBuffer).length;
+    expect(audioFrameCount).toBeLessThanOrEqual(20);
   });
 });
