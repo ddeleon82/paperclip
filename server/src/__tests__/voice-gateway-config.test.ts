@@ -44,6 +44,11 @@ describe("geminiApiKey env fallback order", () => {
     const cfg = build({ VOICE_GATEWAY_GEMINI_API_KEY: "" });
     expect(cfg.geminiApiKey).toBeNull();
   });
+
+  it("returns trimmed value when VOICE_GATEWAY_GEMINI_API_KEY has surrounding whitespace", () => {
+    const cfg = build({ VOICE_GATEWAY_GEMINI_API_KEY: "  padded-key  " });
+    expect(cfg.geminiApiKey).toBe("padded-key");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -145,6 +150,11 @@ describe("warmHoldMs", () => {
 
   it("falls back to default on non-numeric value", () => {
     const cfg = build({ VOICE_GATEWAY_WARM_HOLD_MS: "nope" });
+    expect(cfg.warmHoldMs).toBe(60_000);
+  });
+
+  it("falls back to default on float value", () => {
+    const cfg = build({ VOICE_GATEWAY_WARM_HOLD_MS: "1.5" });
     expect(cfg.warmHoldMs).toBe(60_000);
   });
 });

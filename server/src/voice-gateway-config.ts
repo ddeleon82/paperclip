@@ -17,14 +17,16 @@ const DEFAULT_WARM_HOLD_MS = 60_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
 
 function nullIfEmpty(value: string | undefined): string | null {
-  if (value === undefined || value.trim() === "") return null;
-  return value;
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  return trimmed;
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 /**
@@ -84,9 +86,7 @@ export function buildVoiceGatewayConfig(
  * in route registration logic in later tasks.
  */
 export function isVoiceGatewayEnabled(cfg: VoiceGatewayConfig): boolean {
-  if (cfg.geminiApiKey === null) return false;
-  if (cfg.output === "cascade" && cfg.elevenlabsApiKey === null) return false;
-  return true;
+  return voiceGatewayDisabledReason(cfg) === null;
 }
 
 /**
