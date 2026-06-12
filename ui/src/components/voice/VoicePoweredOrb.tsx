@@ -19,7 +19,7 @@ import { Renderer, Program, Mesh, Triangle, Vec3 } from "ogl";
 import type { OGLRenderingContext } from "ogl";
 
 import { cn } from "@/lib/utils";
-type MutablePhase = "idle" | "listening" | "thinking" | "speaking";
+type MutablePhase = "idle" | "listening" | "thinking" | "speaking" | "working";
 type Phase = MutablePhase | "muted" | "error";
 
 interface VoicePoweredOrbProps {
@@ -53,6 +53,9 @@ const PHASE_TO_TARGETS: Record<
   listening: { hover: 0.0, rotation: 0.15, hueOffset: 0 },
   thinking: { hover: 0.15, rotation: 0.9, hueOffset: -20 },
   speaking: { hover: 0.55, rotation: 0.8, hueOffset: 25 },
+  // FRE-1361: a dispatched Conrad run is in flight. Distinct color shift plus
+  // faster spin and visible surface motion so Dom can tell work is happening.
+  working: { hover: 0.3, rotation: 1.6, hueOffset: 60 },
   muted: { hover: 0.0, rotation: 0.0, hueOffset: -80 },
   error: { hover: 0.0, rotation: 0.0, hueOffset: 150 },
 };

@@ -262,3 +262,114 @@ describe("VoiceMode page (gateway client)", () => {
     expect(orb!.dataset.phase).toBe("listening");
   });
 });
+
+// ---------------------------------------------------------------------------
+// FRE-1361: orb "working" state while a dispatched run is active
+// ---------------------------------------------------------------------------
+describe("VoiceMode orb working state (FRE-1361)", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  function orb(): HTMLElement {
+    return container.querySelector<HTMLElement>('[data-testid="voice-orb"]')!;
+  }
+
+  function status(): HTMLElement {
+    return container.querySelector<HTMLElement>('[data-testid="voice-mode-status"]')!;
+  }
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    navigateMock.mockReset();
+    sendMock.mockReset();
+    sendAudioMock.mockReset();
+    orbPropsLog.length = 0;
+    capturedCallbacks = null;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).HTMLMediaElement.prototype.play = vi.fn().mockResolvedValue(undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).HTMLMediaElement.prototype.pause = vi.fn();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).URL.createObjectURL = vi.fn(() => "blob:test");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).URL.revokeObjectURL = vi.fn();
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("run-dispatched flips the orb to working with the working status label", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => { pushMsg({ type: "ready", sessionId: "s1" }); });
+    await act(async () => { pushMsg({ type: "run-dispatched", runId: "run-1" }); });
+
+    expect(orb().dataset.phase).toBe("working");
+    expect(status().dataset.phase).toBe("working");
+    expect(status().textContent ?? "").toContain("Conrad is working on it");
+  });
+
+  it("task-created also flips the orb to working", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => { pushMsg({ type: "ready", sessionId: "s1" }); });
+    await act(async () => {
+      pushMsg({
+        type: "task-created",
+        identifier: "FRE-1400",
+        title: "Fix the broken Klaviyo flow",
+        runId: "run-1",
+      });
+    });
+
+    expect(orb().dataset.phase).toBe("working");
+  });
+
+  it("working holds through listening/thinking status, but speaking wins", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => { pushMsg({ type: "ready", sessionId: "s1" }); });
+    await act(async () => { pushMsg({ type: "run-dispatched", runId: "run-1" }); });
+
+    await act(async () => { pushMsg({ type: "status", state: "listening" }); });
+    expect(orb().dataset.phase).toBe("working");
+
+    await act(async () => { pushMsg({ type: "status", state: "thinking" }); });
+    expect(orb().dataset.phase).toBe("working");
+
+    await act(async () => { pushMsg({ type: "status", state: "speaking" }); });
+    expect(orb().dataset.phase).toBe("speaking");
+    expect(status().textContent ?? "").toMatch(/speaking/i);
+
+    // Back to listening: still working (run is active again in display terms)
+    await act(async () => { pushMsg({ type: "status", state: "listening" }); });
+    expect(orb().dataset.phase).toBe("working");
+  });
+
+  it("run-complete for the only active run returns the orb to the machine phase", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => { pushMsg({ type: "ready", sessionId: "s1" }); });
+    await act(async () => { pushMsg({ type: "run-dispatched", runId: "run-1" }); });
+    expect(orb().dataset.phase).toBe("working");
+
+    await act(async () => { pushMsg({ type: "run-complete", runId: "run-1", ok: true }); });
+    expect(orb().dataset.phase).toBe("listening");
+    expect(status().textContent ?? "").toMatch(/listening/i);
+  });
+
+  it("two dispatched runs: completing one keeps working, completing both clears it", async () => {
+    await act(async () => { root.render(<VoiceMode />); });
+    await act(async () => { pushMsg({ type: "ready", sessionId: "s1" }); });
+    await act(async () => { pushMsg({ type: "run-dispatched", runId: "run-a" }); });
+    await act(async () => { pushMsg({ type: "run-dispatched", runId: "run-b" }); });
+    expect(orb().dataset.phase).toBe("working");
+
+    await act(async () => { pushMsg({ type: "run-complete", runId: "run-a", ok: true }); });
+    expect(orb().dataset.phase).toBe("working");
+
+    await act(async () => { pushMsg({ type: "run-complete", runId: "run-b", ok: false }); });
+    expect(orb().dataset.phase).toBe("listening");
+  });
+});

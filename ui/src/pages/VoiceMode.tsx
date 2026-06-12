@@ -37,11 +37,17 @@ import { VoiceControls } from "@/components/voice/VoiceControls";
 
 type Phase = "idle" | "listening" | "thinking" | "speaking" | "muted" | "error";
 
-function phaseToStatusLabel(phase: Phase): string {
+// Display phase shown to the user. "working" is derived, never stored: it
+// overlays idle/listening/thinking while a voice-dispatched Conrad run is
+// active (FRE-1361). The underlying machine phase is left untouched.
+type DisplayPhase = Phase | "working";
+
+function phaseToStatusLabel(phase: DisplayPhase): string {
   switch (phase) {
     case "listening": return "Listening — speak when ready";
     case "thinking":  return "Thinking…";
     case "speaking":  return "Speaking";
+    case "working":   return "Conrad is working on it";
     case "muted":     return "Muted — tap mic to unmute";
     case "error":     return "Error — see message below";
     case "idle":
@@ -65,6 +71,11 @@ export function VoiceMode() {
   // audio frame sink's onActivity callback rather than derived from phase so
   // it reflects actual playback, not just protocol messages.
   const [isSpeaking, setIsSpeaking] = useState(false);
+  // Run IDs of voice-dispatched Conrad runs still in flight (FRE-1361).
+  // Non-empty set + a passive machine phase = "working" display phase.
+  const [activeRunIds, setActiveRunIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
   const muted = phase === "muted";
 
@@ -160,12 +171,26 @@ export function VoiceMode() {
         sinkRef.current?.interrupt();
         break;
 
+      case "task-created":
       case "run-dispatched":
-        // Nothing to do in the UI — gateway handles polling.
+        // Track the run so the orb shows the "working" display phase while
+        // Conrad executes. The gateway handles polling and speaks the outcome.
+        setActiveRunIds((prev) => {
+          if (prev.has(msg.runId)) return prev;
+          const next = new Set(prev);
+          next.add(msg.runId);
+          return next;
+        });
         break;
 
       case "run-complete":
-        // Gateway has already spoken the outcome; no UI action needed.
+        // Gateway has already spoken the outcome; just clear the working state.
+        setActiveRunIds((prev) => {
+          if (!prev.has(msg.runId)) return prev;
+          const next = new Set(prev);
+          next.delete(msg.runId);
+          return next;
+        });
         break;
 
       case "error":
@@ -258,7 +283,14 @@ export function VoiceMode() {
   }, [stopPlayback]);
 
   // ------ render ---------------------------------------------------------
-  const statusLabel = phaseToStatusLabel(phase);
+  // "working" overlays passive phases only; speaking/muted/error always win
+  // so live conversation feedback is never masked by background work.
+  const displayPhase: DisplayPhase =
+    activeRunIds.size > 0 &&
+    (phase === "idle" || phase === "listening" || phase === "thinking")
+      ? "working"
+      : phase;
+  const statusLabel = phaseToStatusLabel(displayPhase);
 
   return (
     <div
@@ -279,25 +311,26 @@ export function VoiceMode() {
 
       <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4">
         <VoicePoweredOrb
-          phase={phase}
+          phase={displayPhase}
           className="h-72 w-72 sm:h-80 sm:w-80"
         />
 
         <div
           className="flex items-center gap-2 text-sm text-muted-foreground"
           data-testid="voice-mode-status"
-          data-phase={phase}
+          data-phase={displayPhase}
         >
           <span
             aria-hidden="true"
             className={cn(
               "inline-block h-2 w-2 rounded-full",
-              phase === "listening" && "animate-pulse bg-emerald-500",
-              phase === "thinking"  && "animate-pulse bg-amber-500",
-              phase === "speaking"  && "bg-sky-500",
-              phase === "muted"     && "bg-muted-foreground/60",
-              phase === "error"     && "bg-destructive",
-              phase === "idle"      && "bg-muted-foreground/40",
+              displayPhase === "listening" && "animate-pulse bg-emerald-500",
+              displayPhase === "thinking"  && "animate-pulse bg-amber-500",
+              displayPhase === "speaking"  && "bg-sky-500",
+              displayPhase === "working"   && "animate-pulse bg-violet-500",
+              displayPhase === "muted"     && "bg-muted-foreground/60",
+              displayPhase === "error"     && "bg-destructive",
+              displayPhase === "idle"      && "bg-muted-foreground/40",
             )}
           />
           <span>{statusLabel}</span>
