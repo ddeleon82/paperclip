@@ -9,6 +9,7 @@ import {
   DISPATCH_TO_CONRAD,
   CHECK_RUN,
   BOARD_SNAPSHOT,
+  CREATE_TASK,
 } from "../services/voice-gateway/tool-defs.js";
 
 // ---------------------------------------------------------------------------
@@ -27,8 +28,24 @@ describe("buildGatewaySystemPrompt", () => {
     expect(prompt.length).toBeGreaterThan(0);
   });
 
-  it("identifies the gateway as the front desk for Conrad", () => {
-    expect(prompt).toContain("front desk for Conrad");
+  it("identifies the speaker as Conrad himself", () => {
+    expect(prompt).toContain("You are Conrad, the AI chief of staff");
+  });
+
+  it("does not frame the gateway as a front desk for Conrad", () => {
+    expect(prompt).not.toContain("front desk");
+  });
+
+  it("contains the first person rule", () => {
+    expect(prompt).toContain("Speak in the first person");
+  });
+
+  it("forbids referring to Conrad in the third person", () => {
+    expect(prompt).toContain("Never refer to Conrad in the third person");
+  });
+
+  it("forbids saying work was handed off to Conrad", () => {
+    expect(prompt).toContain("never say you have handed anything off to Conrad");
   });
 
   it("contains the wake word gating rule", () => {
@@ -43,16 +60,16 @@ describe("buildGatewaySystemPrompt", () => {
     expect(prompt).toContain("output nothing at all");
   });
 
-  it("contains persona containment rule", () => {
+  it("contains answer containment rule", () => {
     expect(prompt).toContain("Never answer substantive questions");
   });
 
-  it("contains the dispatch instruction", () => {
-    expect(prompt).toContain("call dispatch_to_conrad");
+  it("routes all substantive replies through tool calls", () => {
+    expect(prompt).toContain("Everything substantive goes through a tool call");
   });
 
   it("contains the relay rule for completed runs", () => {
-    expect(prompt).toContain("completed Conrad run");
+    expect(prompt).toContain("completed background run");
   });
 
   it("contains voice style: short sentences", () => {
@@ -75,12 +92,18 @@ describe("buildGatewaySystemPrompt", () => {
     expect(prompt).toContain("TASK CREATION:");
   });
 
-  it("contains create_task call rule for actionable work", () => {
-    expect(prompt).toContain("call create_task with a short title and the full request as detail");
+  it("makes create_task the default for any actionable work", () => {
+    expect(prompt).toContain(
+      "always call create_task with a short title and the full request as detail"
+    );
   });
 
-  it("contains task identifier acknowledgment rule", () => {
-    expect(prompt).toContain("tell the user the task identifier and that Conrad is on it");
+  it("contains the existing-task exception", () => {
+    expect(prompt).toContain("unless the user refers to a task that already exists in the system");
+  });
+
+  it("contains first person task acknowledgment rule", () => {
+    expect(prompt).toContain("tell the user the task identifier and that you are on it");
   });
 
   it("contains rule to not create a task for questions or status updates", () => {
@@ -89,12 +112,14 @@ describe("buildGatewaySystemPrompt", () => {
     );
   });
 
-  it("contains alternatives for non-task requests", () => {
-    expect(prompt).toContain("dispatch_to_conrad, check_run, or board_snapshot instead");
-  });
-
   it("contains rule against creating more than one task per request", () => {
     expect(prompt).toContain("Never create more than one task per user request");
+  });
+
+  it("forbids claiming work is underway without a tool result", () => {
+    expect(prompt).toContain(
+      "Never tell the user work is underway unless a tool call has returned a result in this turn"
+    );
   });
 });
 
@@ -120,6 +145,18 @@ describe("DISPATCH_TO_CONRAD tool declaration", () => {
     expect(DISPATCH_TO_CONRAD.description).toContain("runId");
   });
 
+  it("description scopes it to questions and existing work", () => {
+    expect(DISPATCH_TO_CONRAD.description.toLowerCase()).toContain("existing");
+  });
+
+  it("description points new actionable work to create_task", () => {
+    expect(DISPATCH_TO_CONRAD.description).toContain("create_task");
+  });
+
+  it("description no longer claims it is for any substantive request", () => {
+    expect(DISPATCH_TO_CONRAD.description).not.toContain("ANY substantive request");
+  });
+
   it("has a prompt string parameter in JSON schema", () => {
     const props = DISPATCH_TO_CONRAD.parameters.properties as Record<string, { type: string }>;
     expect(props["prompt"]).toBeDefined();
@@ -129,6 +166,20 @@ describe("DISPATCH_TO_CONRAD tool declaration", () => {
   it("requires prompt", () => {
     const required = DISPATCH_TO_CONRAD.parameters.required as string[];
     expect(required).toContain("prompt");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CREATE_TASK tool declaration description
+// ---------------------------------------------------------------------------
+
+describe("CREATE_TASK tool declaration description", () => {
+  it("describes create_task as the default for new actionable work", () => {
+    expect(CREATE_TASK.description).toContain("default for ANY new actionable work");
+  });
+
+  it("does not describe Conrad in the third person", () => {
+    expect(CREATE_TASK.description).not.toContain("start Conrad working");
   });
 });
 

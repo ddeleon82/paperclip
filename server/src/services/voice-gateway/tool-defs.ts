@@ -15,13 +15,13 @@ export interface GatewayFunctionDeclaration {
 }
 
 /**
- * Dispatch the user's request to Conrad as a background task.
+ * Dispatch a question or existing-work request as a background task.
  * Returns a runId that can be polled with check_run.
  */
 export const DISPATCH_TO_CONRAD: GatewayFunctionDeclaration = {
   name: "dispatch_to_conrad",
   description:
-    "Send the user's request to Conrad as a background task. Returns a runId. Use for ANY substantive request.",
+    "Answer a question or follow up on existing work via a background task. Returns a runId. Only for questions, status checks, and existing tasks. For new actionable work call create_task instead.",
   parameters: {
     type: "object",
     properties: {
@@ -67,12 +67,12 @@ export const BOARD_SNAPSHOT: GatewayFunctionDeclaration = {
 };
 
 /**
- * Create a Paperclip board task from the user's request, then start Conrad on it.
+ * Create a Paperclip board task from the user's request, then start a run on it.
  */
 export const CREATE_TASK: GatewayFunctionDeclaration = {
   name: "create_task",
   description:
-    "Create a task on the Paperclip board from the user's request and start Conrad working on it. Returns the task identifier and a runId. Use when the user asks for NEW actionable work. Do not use for questions or status checks.",
+    "Create a task on the Paperclip board from the user's request and immediately start a background run on it. Returns the task identifier and a runId. This is the default for ANY new actionable work, unless the user refers to a task that already exists. Do not use for questions or status checks.",
   parameters: {
     type: "object",
     properties: {
