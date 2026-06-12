@@ -42,7 +42,6 @@ export interface GatewaySessionDeps {
   ctx: {
     companyId: string;
     userId: string;
-    agentId: string;
   };
   liveClient: LiveClient;
   createTtsPipe(deps: TtsPipeDeps): TtsPipe;
@@ -91,6 +90,10 @@ export function createGatewaySession(deps: GatewaySessionDeps): GatewaySessionHa
   let ttsPipe: TtsPipe | null = null;
 
   let dbSessionId: string | null = null;
+  // Real agent UUID from the client's "start" message (FRE-1382). ctx has no
+  // agentId: binding identity at factory time caused a Firebase UID to leak
+  // into UUID columns via heartbeat.wakeup (PostgresError 22P02).
+  let startedAgentId: string | null = null;
   let muted = false;
   let destroyed = false;
   let reconnectAttempt = 0; // tracks how many reconnect attempts made
@@ -264,22 +267,45 @@ export function createGatewaySession(deps: GatewaySessionDeps): GatewaySessionHa
     if (destroyed || !liveSession || !dbSessionId) return;
 
     let result: ToolCallResult;
-    try {
-      result = await routeToolCall(toolDeps, {
-        companyId: ctx.companyId,
-        agentId: ctx.agentId,
-        sessionId: dbSessionId,
-        userId: ctx.userId,
-      }, call);
-    } catch (err) {
-      console.warn("[voice-gateway] routeToolCall threw", { call, err });
-      result = { response: { error: String(err) } };
+    let toolError: unknown = null;
+    if (!startedAgentId) {
+      // Cannot happen in practice (liveSession is only set after doStart),
+      // but never dispatch with a missing identity — fail loudly instead.
+      toolError = new Error("no agentId from start message");
+      result = { response: { error: "no agentId from start message" } };
+    } else {
+      try {
+        result = await routeToolCall(toolDeps, {
+          companyId: ctx.companyId,
+          agentId: startedAgentId,
+          sessionId: dbSessionId,
+          userId: ctx.userId,
+        }, call);
+      } catch (err) {
+        toolError = err;
+        result = { response: { error: String(err) } };
+      }
+    }
+
+    if (toolError !== null) {
+      console.warn("[voice-gateway] routeToolCall threw", { call, err: toolError });
     }
 
     if (destroyed) return;
 
     // Send the tool response back to Gemini
     liveSession.sendToolResponse(call.id, call.name, result.response);
+
+    // FRE-1382 no-silent-failures: a thrown tool call must reach the user,
+    // not just the server log. Tell the client and instruct Gemini to say it.
+    if (toolError !== null) {
+      send({ type: "error", message: `Tool ${call.name} failed` });
+      liveSession.sendSystemText(
+        `[system] The ${call.name} tool call failed with an internal error. ` +
+        "Tell the user their request did not go through.",
+      );
+      return;
+    }
 
     // If this was a dispatch, watch for the run to complete
     if (result.dispatchedRunId) {
@@ -432,6 +458,9 @@ export function createGatewaySession(deps: GatewaySessionDeps): GatewaySessionHa
 
   async function doStart(agentId: string): Promise<void> {
     if (destroyed) return;
+
+    // Store the real agent UUID for tool dispatch (FRE-1382).
+    startedAgentId = agentId;
 
     // Create DB session
     const { id: sessionId } = await voiceSessions.createSession({

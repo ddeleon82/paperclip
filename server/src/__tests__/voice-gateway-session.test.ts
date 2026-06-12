@@ -214,7 +214,6 @@ function makeToolDeps(): ToolDeps {
 const DEFAULT_CTX = {
   companyId: "co-1",
   userId: "user-1",
-  agentId: "agent-1",
 };
 
 // ---------------------------------------------------------------------------
@@ -772,6 +771,98 @@ describe("GatewaySession - behavior 5: toolCalls", () => {
     };
     expect(runComplete.runId).toBe("run-tool-123");
     expect(runComplete.ok).toBe(true);
+  });
+
+  // FRE-1382: ctx.agentId was a Firebase-UID placeholder in prod wiring; the
+  // real agent UUID arrives in the start message and MUST be the one passed
+  // to heartbeat.wakeup. These tests use a start agentId that differs from
+  // anything in ctx to catch placeholder leakage.
+  it("dispatch_to_conrad: wakeup receives the agentId from the start message (FRE-1382)", async () => {
+    const { deps, liveClient, toolDeps } = makeDeps();
+    const session = createGatewaySession(deps);
+    const socket = makeSocket();
+
+    session.attachSocket(socket);
+    session.handleMessage({ type: "start", agentId: "agent-uuid-from-start" });
+    await vi.waitFor(() => liveClient.connectCallCount === 1);
+    await vi.waitFor(() => socket.sentMessages().some((m) => m.type === "ready"));
+
+    liveClient.emit({
+      toolCalls: [{ id: "tc-1382", name: "dispatch_to_conrad", args: { prompt: "Status?" } }],
+    });
+
+    const wakeup = toolDeps.wakeup as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => {
+      expect(wakeup.mock.calls.length).toBeGreaterThan(0);
+    }, { timeout: 2000 });
+
+    expect(wakeup.mock.calls[0][0]).toBe("agent-uuid-from-start");
+  });
+
+  it("create_task: wakeup receives the agentId from the start message (FRE-1382)", async () => {
+    const { deps, liveClient, toolDeps } = makeDeps();
+    const session = createGatewaySession(deps);
+    const socket = makeSocket();
+
+    session.attachSocket(socket);
+    session.handleMessage({ type: "start", agentId: "agent-uuid-from-start" });
+    await vi.waitFor(() => liveClient.connectCallCount === 1);
+    await vi.waitFor(() => socket.sentMessages().some((m) => m.type === "ready"));
+
+    liveClient.emit({
+      toolCalls: [{ id: "tc-1382b", name: "create_task", args: { title: "Do the thing" } }],
+    });
+
+    const wakeup = toolDeps.wakeup as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => {
+      expect(wakeup.mock.calls.length).toBeGreaterThan(0);
+    }, { timeout: 2000 });
+
+    expect(wakeup.mock.calls[0][0]).toBe("agent-uuid-from-start");
+  });
+
+  it("tool call throw → error to client + system text so Gemini tells the user (FRE-1382)", async () => {
+    const toolDeps = makeToolDeps();
+    (toolDeps.wakeup as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('PostgresError: invalid input syntax for type uuid: "9GaJ..."'),
+    );
+    const { deps, liveClient } = makeDeps({ toolDeps });
+    const session = createGatewaySession(deps);
+    const socket = makeSocket();
+
+    session.attachSocket(socket);
+    session.handleMessage({ type: "start", agentId: "agent-uuid-from-start" });
+    await vi.waitFor(() => liveClient.connectCallCount === 1);
+    await vi.waitFor(() => socket.sentMessages().some((m) => m.type === "ready"));
+
+    liveClient.emit({
+      toolCalls: [{ id: "tc-1382c", name: "dispatch_to_conrad", args: { prompt: "Status?" } }],
+    });
+
+    const liveSessionRef = liveClient.session!;
+
+    // Tool response with the error still goes back to Gemini
+    await vi.waitFor(() => {
+      expect(liveSessionRef._toolResponses.length).toBeGreaterThan(0);
+    }, { timeout: 2000 });
+    expect(liveSessionRef._toolResponses[0].id).toBe("tc-1382c");
+    expect(liveSessionRef._toolResponses[0].response.error).toBeTruthy();
+
+    // Client is told (no-silent-failures)
+    await vi.waitFor(() => {
+      expect(socket.sentMessages().some((m) => m.type === "error")).toBe(true);
+    }, { timeout: 2000 });
+    const errMsg = socket.sentMessages().find((m) => m.type === "error") as {
+      type: "error";
+      message: string;
+    };
+    expect(errMsg.message).toContain("dispatch_to_conrad");
+
+    // Gemini is instructed to tell the user out loud
+    await vi.waitFor(() => {
+      expect(liveSessionRef._systemTexts.length).toBeGreaterThan(0);
+    }, { timeout: 2000 });
+    expect(liveSessionRef._systemTexts.some((t) => t.includes("failed"))).toBe(true);
   });
 });
 

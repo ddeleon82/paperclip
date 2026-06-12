@@ -601,14 +601,11 @@ export async function startServer(): Promise<StartedServer> {
           output: config.voiceGateway.output,
         });
         return createGatewaySession({
+          // agentId is unknown at registry creation time; the "start" message
+          // carries it and the session stores it for tool dispatch (FRE-1382).
           ctx: {
             companyId,
             userId,
-            // agentId is unknown at registry creation time; the "start" message
-            // carries it. The session stores it from the first start message.
-            // Until Task 11 wires real agentId lookup, use a placeholder that
-            // routeToolCall will pass to heartbeat.wakeup.
-            agentId: userId,
           },
           liveClient,
           createTtsPipe,
