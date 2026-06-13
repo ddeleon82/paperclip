@@ -116,6 +116,48 @@ function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscri
   return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
 }
 
+const MOONSHOT_ANTHROPIC_BASE_URL = "https://api.moonshot.ai/anthropic";
+
+/** Moonshot Kimi model ids (e.g. "kimi-k2.6") run via the Anthropic-compatible endpoint (FRE-1392). */
+function isKimiModelId(model: string): boolean {
+  return model.trim().toLowerCase().startsWith("kimi-");
+}
+
+/**
+ * FRE-1392: route Kimi models through Moonshot's Anthropic-compatible API.
+ * Mutates env: points the Claude CLI at the Moonshot base URL with key auth,
+ * remaps the Claude alias models (small/fast + subagent opus/sonnet/haiku
+ * defaults) to the selected Kimi model so sub-operations don't request
+ * nonexistent claude-* ids, and blanks the inherited subscription OAuth token
+ * so key auth wins. Throws when no key is available - a Kimi run without a key
+ * must fail loudly at spawn, not 404 mid-run against the Anthropic API.
+ */
+function applyKimiEnv(env: Record<string, string>, model: string): void {
+  const kimiKey =
+    (env.KIMI_API_KEY ?? "").trim() ||
+    (process.env.KIMI_API_KEY ?? "").trim() ||
+    (process.env.MOONSHOT_API_KEY ?? "").trim();
+  if (!kimiKey) {
+    throw new Error(
+      `Model "${model}" requires a Moonshot API key: set KIMI_API_KEY in the server environment or in the agent's env config (FRE-1392).`,
+    );
+  }
+  if (!hasNonEmptyEnvValue(env, "ANTHROPIC_BASE_URL")) {
+    env.ANTHROPIC_BASE_URL = MOONSHOT_ANTHROPIC_BASE_URL;
+  }
+  env.ANTHROPIC_AUTH_TOKEN = kimiKey;
+  env.ANTHROPIC_API_KEY = kimiKey;
+  for (const aliasKey of [
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  ]) {
+    if (!hasNonEmptyEnvValue(env, aliasKey)) env[aliasKey] = model;
+  }
+  env.CLAUDE_CODE_OAUTH_TOKEN = "";
+}
+
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, authToken } = input;
 
@@ -357,6 +399,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     graceSec,
     extraArgs,
   } = runtimeConfig;
+  // FRE-1392: Kimi (Moonshot) models run against the Anthropic-compatible endpoint.
+  // Mutates the same env object that runChildProcess receives below.
+  if (model && isKimiModelId(model)) {
+    applyKimiEnv(env, model);
+  }
   const effectiveEnv = Object.fromEntries(
     Object.entries({ ...process.env, ...env }).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",

@@ -10,6 +10,7 @@ export const models = [
   { id: "claude-haiku-4-6", label: "Claude Haiku 4.6" },
   { id: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+  { id: "kimi-k2.6", label: "Kimi K2.6 (Moonshot)" },
 ];
 
 export const agentConfigurationDoc = `# claude_local agent configuration
@@ -37,4 +38,5 @@ Operational fields:
 
 Notes:
 - When Paperclip realizes a workspace/runtime for a run, it injects PAPERCLIP_WORKSPACE_* and PAPERCLIP_RUNTIME_* env vars for agent-side tooling.
+- Kimi models (model ids starting with "kimi-") route through Moonshot's Anthropic-compatible API (https://api.moonshot.ai/anthropic). Requires KIMI_API_KEY in the server environment or the agent's env config (FRE-1392).
 `;
