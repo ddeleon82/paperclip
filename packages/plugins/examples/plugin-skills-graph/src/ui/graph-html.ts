@@ -691,10 +691,8 @@ const DATA = {"nodes":[{"id":"skill_agent_reach","label":"agent-reach","descript
       .filter(Boolean);
 
     const neighborTags = neighbors
-      .slice(0, 24)
       .map(n => '<span class="d-tag d-tag-nav" data-nid="' + esc(n.id) + '">' + esc(n.label) + '</span>')
       .join('');
-    const moreCount = Math.max(0, neighbors.length - 24);
 
     const skillAgents = DATA.skillAgents[node.id] || [];
     const agentTags = skillAgents
@@ -714,7 +712,6 @@ const DATA = {"nodes":[{"id":"skill_agent_reach","label":"agent-reach","descript
         : '') +
       '<div class="d-label">Connections (' + neighbors.length + ')</div>' +
       '<div class="d-tags">' + (neighborTags || '<span style="color:#555;">None</span>') +
-        (moreCount > 0 ? '<span class="d-tag" style="color:#555;">+' + moreCount + ' more</span>' : '') +
       '</div>' +
       (node.sourceFile ? '<div class="d-source">' + esc(node.sourceFile) + '</div>' : '');
 
@@ -753,21 +750,18 @@ const DATA = {"nodes":[{"id":"skill_agent_reach","label":"agent-reach","descript
         const aDeg = edges.filter(e => e.source === a.id || e.target === a.id).length;
         const bDeg = edges.filter(e => e.source === b.id || e.target === b.id).length;
         return bDeg - aDeg;
-      })
-      .slice(0, 12);
+      });
 
     const skillTags = topNodes
       .map(n => '<span class="d-tag d-tag-nav" data-nid="' + esc(n.id) + '" style="cursor:pointer;">' + esc(n.label) + '</span>')
       .join('');
-    const moreCount = Math.max(0, commNodes.length - 12);
 
     document.getElementById('detail-content').innerHTML =
       '<div class="d-kind">Branch</div>' +
       '<h3 style="color:' + comm.color + ';">' + esc(comm.label) + '</h3>' +
-      '<p>' + commNodes.length + ' skills in this branch. Shows the most-connected skills first.</p>' +
-      '<div class="d-label">Top Skills</div>' +
+      '<p>' + commNodes.length + ' skills in this branch, ordered by how connected they are.</p>' +
+      '<div class="d-label">Skills</div>' +
       '<div class="d-tags">' + (skillTags || '<span style="color:#555;">None</span>') +
-        (moreCount > 0 ? '<span class="d-tag" style="color:#555;">+' + moreCount + ' more</span>' : '') +
       '</div>';
 
     // wire skill tag clicks
