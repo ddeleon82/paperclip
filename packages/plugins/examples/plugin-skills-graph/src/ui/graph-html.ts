@@ -77,6 +77,46 @@ export const GRAPH_HTML = `<!DOCTYPE html>
   .toolbar button:hover { color: var(--text); border-color: #333; }
   .toolbar button.active { color: #050505; background: var(--accent); border-color: var(--accent); }
   .search-stats { font-size: 11px; color: #555; align-self: center; padding: 0 4px; }
+
+  /* Ask the Graph panel (FRE-1613 #3) */
+  .ask-panel {
+    position: absolute; top: 62px; right: 16px; z-index: 45; width: 340px;
+    max-height: calc(100% - 90px); display: none; flex-direction: column;
+    background: #0a0a0a; border: 1px solid #1f1f1f; border-radius: 12px;
+    box-shadow: 0 18px 50px rgba(0,0,0,0.55); font-family: 'Outfit', sans-serif;
+    overflow: hidden;
+  }
+  .ask-panel.open { display: flex; }
+  .ask-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px; }
+  .ask-title { font-size: 13px; font-weight: 600; color: var(--text); flex: 1; }
+  .ask-hint { font-size: 11px; color: #666; padding: 0 14px 8px; line-height: 1.4; }
+  .ask-form { display: flex; gap: 6px; padding: 0 14px 12px; }
+  .ask-input {
+    flex: 1; background: #050505; border: 1px solid #1f1f1f; border-radius: 8px;
+    padding: 8px 10px; font-size: 13px; color: var(--text); outline: none;
+    font-family: 'Outfit', sans-serif; transition: border-color 0.15s;
+  }
+  .ask-input:focus { border-color: #333; }
+  .ask-send {
+    background: var(--accent); border: none; border-radius: 8px; color: #050505;
+    font-size: 12px; font-weight: 600; padding: 0 12px; cursor: pointer;
+    font-family: 'Outfit', sans-serif; transition: opacity 0.15s;
+  }
+  .ask-send:hover { opacity: 0.85; }
+  .ask-results { overflow-y: auto; padding: 0 8px 10px; }
+  .ask-lead { font-size: 12px; color: var(--text-secondary); padding: 4px 6px 8px; line-height: 1.45; }
+  .ask-result {
+    display: block; width: 100%; text-align: left; background: none;
+    border: 1px solid transparent; border-radius: 8px; padding: 8px 8px;
+    cursor: pointer; transition: background 0.12s, border-color 0.12s; margin-bottom: 2px;
+  }
+  .ask-result:hover { background: rgba(255,255,255,0.04); border-color: #1f1f1f; }
+  .ask-result-top { display: flex; align-items: center; gap: 8px; }
+  .ask-result-name { font-size: 13px; font-weight: 600; color: var(--text); }
+  .ask-result-agent { font-size: 10px; color: var(--text-muted); margin-left: auto; flex-shrink: 0; }
+  .ask-result-desc { font-size: 11px; color: var(--text-secondary); margin-top: 3px; line-height: 1.4; }
+  .ask-empty { font-size: 12px; color: #666; padding: 8px 6px; line-height: 1.45; }
+  .ask-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .legend-title { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 8px; }
   .legend-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; font-size: 12px; color: var(--text-secondary); }
   .legend-row:hover { color: var(--text); }
@@ -122,7 +162,21 @@ export const GRAPH_HTML = `<!DOCTYPE html>
 <div class="toolbar">
   <input id="search" type="search" placeholder="Search skills..." autocomplete="off" />
   <span id="search-stats" class="search-stats"></span>
+  <button id="ask-toggle" title="Ask which skills fit a task">Ask</button>
   <button id="toggle-agents" title="Show agent overlay">Agents</button>
+</div>
+
+<div id="ask-panel" class="ask-panel">
+  <div class="ask-head">
+    <span class="ask-title">Ask the Graph</span>
+    <button class="detail-close" id="ask-close" style="position:static;">&times;</button>
+  </div>
+  <div class="ask-hint">Describe a task and get the most relevant skills in this graph. e.g. "designing landing pages" or "cold email outreach".</div>
+  <form class="ask-form" id="ask-form">
+    <input id="ask-input" class="ask-input" type="text" placeholder="What do you want to do?" autocomplete="off" />
+    <button class="ask-send" type="submit">Ask</button>
+  </form>
+  <div id="ask-results" class="ask-results"></div>
 </div>
 
 <div class="wf-rubric-brand">
@@ -871,6 +925,144 @@ const DATA = {"nodes":[{"id":"skill_agent_reach","label":"agent-reach","descript
     agentLayerOn = !agentLayerOn;
     e.target.classList.toggle('active', agentLayerOn);
     if (!agentLayerOn) activeAgent = null;
+  });
+
+  // ---- Ask the Graph (FRE-1613 #3): relevance ranking over skills ----
+  const ASK_STOPWORDS = new Set([
+    'a','an','the','for','to','in','of','on','at','by','and','or','best','which',
+    'what','whats','how','do','i','my','our','with','are','is','be','skill','skills',
+    'use','using','help','me','can','you','want','need','should','about','that','this',
+    'get','make','build','create','some','good','great','work','task','tasks','tool','tools'
+  ]);
+  // Targeted intent expansion to widen recall on common F&C jobs-to-be-done.
+  const ASK_SYNONYMS = {
+    'landing': ['landing','page','funnel','lp','website','web','conversion','optin','squeeze','frontend'],
+    'page': ['page','landing','website','web','funnel','frontend'],
+    'pages': ['page','landing','website','web','funnel','frontend'],
+    'website': ['website','web','landing','page','frontend','funnel'],
+    'funnel': ['funnel','landing','page','optin','conversion','tripwire','webinar'],
+    'design': ['design','ui','ux','visual','frontend','layout','figma','aesthetic','brand'],
+    'designing': ['design','ui','ux','visual','frontend','layout','figma','aesthetic','brand'],
+    'ad': ['ad','ads','advertising','creative','campaign','meta','google','tiktok','linkedin'],
+    'ads': ['ad','ads','advertising','creative','campaign','meta','google','tiktok','linkedin'],
+    'email': ['email','outreach','sequence','klaviyo','cold','newsletter','copy'],
+    'cold': ['cold','outreach','email','prospect','sales','lead'],
+    'video': ['video','reel','motion','cinematic','seedance','kling','higgsfield'],
+    'image': ['image','imagegen','photo','visual','soul','banana','poster'],
+    'images': ['image','imagegen','photo','visual','soul','banana','poster'],
+    'sales': ['sales','outreach','pipeline','lead','prospect','cold','proposal'],
+    'lead': ['lead','sales','prospect','outreach','pipeline'],
+    'leads': ['lead','sales','prospect','outreach','pipeline'],
+    'research': ['research','analysis','market','competitor','intel','company'],
+    'slide': ['slide','deck','presentation','pitch','marp','slides'],
+    'slides': ['slide','deck','presentation','pitch','marp','slides'],
+    'deck': ['deck','slide','presentation','pitch','slides'],
+    'pdf': ['pdf','document','report','print'],
+    'copy': ['copy','copywriting','headline','messaging','writing'],
+    'seo': ['seo','content','organic','search'],
+    'scrape': ['scrape','scraping','crawl','extract','data'],
+    'shopify': ['shopify','ecommerce','store','checkout','cart','product']
+  };
+
+  function askAgentNames(node) {
+    return (DATA.skillAgents[node.id] || [])
+      .map(aid => (DATA.agents.find(a => a.id === aid) || {}).name)
+      .filter(Boolean);
+  }
+
+  function askTokenize(q) {
+    const raw = (q || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ');
+    const out = [];
+    raw.forEach(t => {
+      if (!t || t.length < 2 || ASK_STOPWORDS.has(t)) return;
+      out.push(t);
+      (ASK_SYNONYMS[t] || []).forEach(s => out.push(s));
+    });
+    return [...new Set(out)];
+  }
+
+  function askRank(q) {
+    const tokens = askTokenize(q);
+    if (tokens.length === 0) return [];
+    const full = (q || '').toLowerCase().trim();
+    const commLabel = {};
+    DATA.communities.forEach(c => { commLabel[c.id] = (c.label || '').toLowerCase(); });
+    const scored = [];
+    DATA.nodes.forEach(n => {
+      const label = (n.label || '').toLowerCase();
+      const desc = (n.description || '').toLowerCase();
+      const comm = commLabel[n.community] || '';
+      const agents = askAgentNames(n).join(' ').toLowerCase();
+      const idStr = (n.id || '').toLowerCase();
+      let score = 0;
+      tokens.forEach(t => {
+        if (label.indexOf(t) !== -1) score += 5;
+        if (comm.indexOf(t) !== -1) score += 3;
+        if (desc.indexOf(t) !== -1) score += 2;
+        if (agents.indexOf(t) !== -1) score += 2;
+        if (idStr.indexOf(t) !== -1) score += 1;
+      });
+      if (full && label.indexOf(full) !== -1) score += 8;
+      if (score > 0) scored.push({ node: n, score: score });
+    });
+    scored.sort((a, b) => b.score - a.score || a.node.label.localeCompare(b.node.label));
+    return scored.slice(0, 8);
+  }
+
+  function askRender(q) {
+    const box = document.getElementById('ask-results');
+    const ranked = askRank(q);
+    if (ranked.length === 0) {
+      box.innerHTML = '<div class="ask-empty">No close matches in the graph. Try simpler words like "landing page", "cold email", or "video".</div>';
+      return;
+    }
+    let html = '<div class="ask-lead">Top ' + ranked.length + ' skill' + (ranked.length === 1 ? '' : 's') +
+      ' for "' + esc(q.trim()) + '". Click one to open it in the graph.</div>';
+    ranked.forEach(r => {
+      const n = r.node;
+      const agentNames = askAgentNames(n);
+      const agentTxt = agentNames.length ? agentNames.slice(0, 2).join(', ') : '';
+      const d = (n.description || 'No description available.');
+      const snippet = d.length > 110 ? d.slice(0, 110) + '\\u2026' : d;
+      html += '<button class="ask-result" data-nid="' + esc(n.id) + '">' +
+        '<div class="ask-result-top">' +
+          '<span class="ask-dot" style="background:' + (n.color || '#888') + ';"></span>' +
+          '<span class="ask-result-name">' + esc(n.label) + '</span>' +
+          (agentTxt ? '<span class="ask-result-agent">' + esc(agentTxt) + '</span>' : '') +
+        '</div>' +
+        '<div class="ask-result-desc">' + esc(snippet) + '</div>' +
+      '</button>';
+    });
+    box.innerHTML = html;
+    box.querySelectorAll('.ask-result').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const target = nodes.find(n => n.id === btn.dataset.nid);
+        if (target) {
+          if (selected && selected.id !== target.id) navHistory.push({ type: 'node', id: selected.id });
+          showNodeDetail(target, false);
+        }
+      });
+    });
+  }
+
+  function askOpen(open) {
+    const panel = document.getElementById('ask-panel');
+    const btn = document.getElementById('ask-toggle');
+    panel.classList.toggle('open', open);
+    btn.classList.toggle('active', open);
+    if (open) document.getElementById('ask-input').focus();
+  }
+
+  document.getElementById('ask-toggle').addEventListener('click', () => {
+    askOpen(!document.getElementById('ask-panel').classList.contains('open'));
+  });
+  document.getElementById('ask-close').addEventListener('click', () => askOpen(false));
+  document.getElementById('ask-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    askRender(document.getElementById('ask-input').value);
+  });
+  document.getElementById('ask-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { askOpen(false); }
   });
 
   window.addEventListener('resize', () => { resize(); layoutAgents(); });

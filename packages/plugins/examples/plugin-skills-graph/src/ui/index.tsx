@@ -52,7 +52,10 @@ export function SkillsGraphSidebarLink({ context }: PluginSidebarProps) {
   );
 }
 
-export function SkillsGraphPage(_props: PluginPageProps) {
+export function SkillsGraphPage({ context }: PluginPageProps) {
+  // FRE-1613 #4: the graph is a full-bleed iframe that otherwise covers the
+  // whole app. Provide an explicit way back to the main Paperclip interface.
+  const homeHref = context?.companyPrefix ? `/${context.companyPrefix}` : "/";
   return (
     <div
       style={{
@@ -64,6 +67,46 @@ export function SkillsGraphPage(_props: PluginPageProps) {
         minHeight: 0,
       }}
     >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "10px",
+          height: "44px",
+          flexShrink: 0,
+          padding: "0 14px",
+          background: "#0a0a0a",
+          borderBottom: "1px solid #1f1f1f",
+          fontFamily: "'Outfit', system-ui, sans-serif",
+        }}
+      >
+        <a
+          href={homeHref}
+          aria-label="Back to Paperclip"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "6px",
+            color: "#cfcfcf",
+            textDecoration: "none",
+            fontSize: "13px",
+            fontWeight: 500,
+            padding: "5px 10px",
+            borderRadius: "8px",
+            border: "1px solid #1f1f1f",
+            background: "#111",
+            transition: "all 0.15s",
+          }}
+        >
+          <span aria-hidden="true" style={{ fontSize: "15px", lineHeight: 1 }}>
+            &#8592;
+          </span>
+          Back to Paperclip
+        </a>
+        <span style={{ fontSize: "13px", fontWeight: 600, color: "#e0e0e0" }}>
+          Skills Graph
+        </span>
+      </div>
       <iframe
         title="Skills Graph"
         srcDoc={GRAPH_HTML}
