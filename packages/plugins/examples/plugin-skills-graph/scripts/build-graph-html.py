@@ -326,6 +326,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .d-source { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #555; margin-top: 12px; word-break: break-all; }
   .detail-close { position: absolute; top: 12px; right: 12px; background: none; border: none; color: #666; font-size: 20px; cursor: pointer; padding: 4px 8px; }
   .detail-close:hover { color: var(--text); }
+  .detail-back { display: none; position: absolute; top: 14px; left: 12px; background: none; border: none; color: #555; font-size: 13px; cursor: pointer; padding: 2px 6px; border-radius: 5px; transition: all 0.15s; }
+  .detail-back:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+  .detail-back.visible { display: inline-flex; align-items: center; gap: 4px; }
+  .d-kind { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+  .legend-row-dim { background: none; border: none; color: #444; font-size: 13px; cursor: pointer; padding: 0 2px; margin-left: 4px; transition: color 0.15s; flex-shrink: 0; }
+  .legend-row-dim:hover { color: #888; }
+  .legend-row.dim .legend-row-dim { color: var(--accent); }
 
   .legend {
     position: absolute; top: 16px; left: 20px; z-index: 30; font-family: 'Outfit', sans-serif;
@@ -383,6 +390,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div id="detail" class="detail" style="display:none;">
+  <button class="detail-back" id="detail-back">&#8592; Back</button>
   <button class="detail-close" id="detail-close">&times;</button>
   <div id="detail-content"></div>
 </div>
@@ -435,6 +443,7 @@ const DATA = __DATA_PAYLOAD__;
   let activeAgent = null;        // when set, only that agent's skills are highlighted
   let searchQuery = "";
   let searchMatchIds = null;     // Set of node ids matching search; null = no search
+  let navHistory = [];           // [{type:'node'|'community', id:...}] navigation history
 
   const canvas = document.getElementById('canvas');
   const ctx = canvas.getContext('2d');
@@ -884,20 +893,24 @@ const DATA = __DATA_PAYLOAD__;
     dragging = null; panning = false; hovered = null; tooltip.style.display = 'none';
   });
 
-  canvas.addEventListener('click', (e) => {
-    const pos = getMousePos(e);
+  function updateBackBtn() {
+    const btn = document.getElementById('detail-back');
+    if (navHistory.length > 0) btn.classList.add('visible');
+    else btn.classList.remove('visible');
+  }
 
-    const agent = getAgentAt(pos.x, pos.y);
-    if (agent) {
-      activeAgent = activeAgent === agent.id ? null : agent.id;
-      return;
+  function showNodeDetail(node, pushToHistory) {
+    if (pushToHistory && (selected || navHistory.length > 0)) {
+      const prev = selected
+        ? { type: 'node', id: node.id }
+        : null;
+      if (selected && selected.id !== node.id) {
+        navHistory.push({ type: 'node', id: selected.id });
+      }
     }
-
-    const node = getNodeAt(pos.x, pos.y);
-    selected = node || null;
-    if (!node) { detail.style.display = 'none'; return; }
-
+    selected = node;
     const commLabel = (DATA.communities.find(c => c.id === node.community) || {}).label || '';
+    const comm = DATA.communities.find(c => c.id === node.community);
     const neighbors = edges
       .filter(e => e.source === node.id || e.target === node.id)
       .map(e => e.source === node.id ? e.target : e.source)
@@ -906,7 +919,7 @@ const DATA = __DATA_PAYLOAD__;
 
     const neighborTags = neighbors
       .slice(0, 24)
-      .map(n => '<span class="d-tag">' + esc(n.label) + '</span>')
+      .map(n => '<span class="d-tag d-tag-nav" data-nid="' + esc(n.id) + '">' + esc(n.label) + '</span>')
       .join('');
     const moreCount = Math.max(0, neighbors.length - 24);
 
@@ -918,10 +931,11 @@ const DATA = __DATA_PAYLOAD__;
       .join('');
 
     document.getElementById('detail-content').innerHTML =
+      '<div class="d-kind">Skill</div>' +
       '<h3>' + esc(node.label) + '</h3>' +
-      '<p>' + esc(node.description || 'No description') + '</p>' +
-      '<div class="d-label">Community</div>' +
-      '<div class="d-tags"><span class="d-tag" style="color:' + node.color + ';">' + esc(commLabel) + '</span></div>' +
+      '<p>' + esc(node.description || 'No description available.') + '</p>' +
+      '<div class="d-label">Branch</div>' +
+      '<div class="d-tags"><span class="d-tag" style="color:' + node.color + ';cursor:pointer;" data-cid="' + (comm ? comm.id : '') + '">' + esc(commLabel) + '</span></div>' +
       (agentTags
         ? '<div class="d-label">Agents</div><div class="d-tags">' + agentTags + '</div>'
         : '') +
@@ -930,12 +944,119 @@ const DATA = __DATA_PAYLOAD__;
         (moreCount > 0 ? '<span class="d-tag" style="color:#555;">+' + moreCount + ' more</span>' : '') +
       '</div>' +
       (node.sourceFile ? '<div class="d-source">' + esc(node.sourceFile) + '</div>' : '');
+
+    // wire neighbor tag clicks for in-panel navigation
+    document.getElementById('detail-content').querySelectorAll('.d-tag-nav').forEach(tag => {
+      tag.style.cursor = 'pointer';
+      tag.addEventListener('click', () => {
+        const nid = tag.dataset.nid;
+        const target = nodes.find(n => n.id === nid);
+        if (target) { navHistory.push({ type: 'node', id: node.id }); showNodeDetail(target, false); updateBackBtn(); }
+      });
+    });
+    // wire branch tag click to community detail
+    const commTag = document.getElementById('detail-content').querySelector('[data-cid]');
+    if (commTag && commTag.dataset.cid !== '') {
+      commTag.addEventListener('click', () => {
+        const cid = parseInt(commTag.dataset.cid);
+        const c = DATA.communities.find(cc => cc.id === cid);
+        if (c) { navHistory.push({ type: 'node', id: node.id }); showCommunityDetail(c, false); updateBackBtn(); }
+      });
+    }
+
     detail.style.display = 'block';
+    updateBackBtn();
+    panToNode(node);
+  }
+
+  function showCommunityDetail(comm, pushToHistory) {
+    if (pushToHistory) {
+      if (selected) navHistory.push({ type: 'node', id: selected.id });
+    }
+    selected = null;
+    const commNodes = nodes.filter(n => n.community === comm.id);
+    const topNodes = commNodes
+      .sort((a, b) => {
+        const aDeg = edges.filter(e => e.source === a.id || e.target === a.id).length;
+        const bDeg = edges.filter(e => e.source === b.id || e.target === b.id).length;
+        return bDeg - aDeg;
+      })
+      .slice(0, 12);
+
+    const skillTags = topNodes
+      .map(n => '<span class="d-tag d-tag-nav" data-nid="' + esc(n.id) + '" style="cursor:pointer;">' + esc(n.label) + '</span>')
+      .join('');
+    const moreCount = Math.max(0, commNodes.length - 12);
+
+    document.getElementById('detail-content').innerHTML =
+      '<div class="d-kind">Branch</div>' +
+      '<h3 style="color:' + comm.color + ';">' + esc(comm.label) + '</h3>' +
+      '<p>' + commNodes.length + ' skills in this branch. Shows the most-connected skills first.</p>' +
+      '<div class="d-label">Top Skills</div>' +
+      '<div class="d-tags">' + (skillTags || '<span style="color:#555;">None</span>') +
+        (moreCount > 0 ? '<span class="d-tag" style="color:#555;">+' + moreCount + ' more</span>' : '') +
+      '</div>';
+
+    // wire skill tag clicks
+    document.getElementById('detail-content').querySelectorAll('.d-tag-nav').forEach(tag => {
+      tag.addEventListener('click', () => {
+        const nid = tag.dataset.nid;
+        const target = nodes.find(n => n.id === nid);
+        if (target) { navHistory.push({ type: 'community', id: comm.id }); showNodeDetail(target, false); updateBackBtn(); }
+      });
+    });
+
+    detail.style.display = 'block';
+    updateBackBtn();
+  }
+
+  function panToNode(node) {
+    if (!node || node.x == null) return;
+    const W = canvas.width / (window.devicePixelRatio || 1);
+    const H = canvas.height / (window.devicePixelRatio || 1);
+    panX = W / 2 - node.x;
+    panY = H / 2 - node.y;
+  }
+
+  function navigateBack() {
+    if (navHistory.length === 0) return;
+    const prev = navHistory.pop();
+    if (prev.type === 'node') {
+      const node = nodes.find(n => n.id === prev.id);
+      if (node) showNodeDetail(node, false);
+      else { detail.style.display = 'none'; selected = null; }
+    } else if (prev.type === 'community') {
+      const comm = DATA.communities.find(c => c.id === prev.id);
+      if (comm) showCommunityDetail(comm, false);
+      else { detail.style.display = 'none'; selected = null; }
+    }
+    updateBackBtn();
+  }
+
+  canvas.addEventListener('click', (e) => {
+    const pos = getMousePos(e);
+
+    const agent = getAgentAt(pos.x, pos.y);
+    if (agent) {
+      activeAgent = activeAgent === agent.id ? null : agent.id;
+      return;
+    }
+
+    const node = getNodeAt(pos.x, pos.y);
+    if (!node) { detail.style.display = 'none'; selected = null; navHistory = []; updateBackBtn(); return; }
+    if (selected && selected.id !== node.id) navHistory.push({ type: 'node', id: selected.id });
+    showNodeDetail(node, false);
   });
 
   document.getElementById('detail-close').addEventListener('click', () => {
     detail.style.display = 'none';
     selected = null;
+    navHistory = [];
+    updateBackBtn();
+  });
+
+  document.getElementById('detail-back').addEventListener('click', () => {
+    navigateBack();
   });
 
   // Build legend
@@ -947,9 +1068,26 @@ const DATA = __DATA_PAYLOAD__;
       row.className = 'legend-row';
       row.innerHTML =
         '<span class="legend-swatch" style="background:' + c.color + ';"></span>' +
-        '<span>' + esc(c.label) + '</span>' +
-        '<span class="legend-count">' + c.size + '</span>';
-      row.addEventListener('click', () => {
+        '<span style="flex:1;cursor:pointer;" class="legend-row-label">' + esc(c.label) + '</span>' +
+        '<span class="legend-count">' + c.size + '</span>' +
+        '<button class="legend-row-dim" title="Toggle visibility">&#9679;</button>';
+
+      // clicking the label/swatch = show community summary
+      const labelEl = row.querySelector('.legend-row-label');
+      const swatchEl = row.querySelector('.legend-swatch');
+      function onSummaryClick(evt) {
+        evt.stopPropagation();
+        if (selected) navHistory.push({ type: 'node', id: selected.id });
+        showCommunityDetail(c, false);
+        updateBackBtn();
+      }
+      labelEl.addEventListener('click', onSummaryClick);
+      swatchEl.addEventListener('click', onSummaryClick);
+
+      // dim toggle button
+      const dimBtn = row.querySelector('.legend-row-dim');
+      dimBtn.addEventListener('click', (evt) => {
+        evt.stopPropagation();
         if (dimmedCommunities.has(c.id)) {
           dimmedCommunities.delete(c.id);
           row.classList.remove('dim');
@@ -979,9 +1117,17 @@ const DATA = __DATA_PAYLOAD__;
       return;
     }
     searchMatchIds = new Set();
+    // also collect community-name matches so their nodes get a group highlight
+    const commMatches = new Set(
+      DATA.communities
+        .filter(c => c.label.toLowerCase().indexOf(searchQuery) !== -1)
+        .map(c => c.id)
+    );
     DATA.nodes.forEach(n => {
       const hay = (n.label + ' ' + (n.description || '')).toLowerCase();
-      if (hay.indexOf(searchQuery) !== -1) searchMatchIds.add(n.id);
+      if (hay.indexOf(searchQuery) !== -1 || commMatches.has(n.community)) {
+        searchMatchIds.add(n.id);
+      }
     });
     stats.textContent = searchMatchIds.size + ' match' + (searchMatchIds.size === 1 ? '' : 'es');
   }
@@ -990,7 +1136,16 @@ const DATA = __DATA_PAYLOAD__;
     applySearch(e.target.value);
   });
   document.getElementById('search').addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.target.value = ''; applySearch(''); }
+    if (e.key === 'Escape') { e.target.value = ''; applySearch(''); return; }
+    if (e.key === 'Enter' && searchMatchIds && searchMatchIds.size > 0) {
+      // jump to first match: pan to it and show its detail
+      const firstId = [...searchMatchIds][0];
+      const node = nodes.find(n => n.id === firstId);
+      if (node) {
+        if (selected && selected.id !== node.id) navHistory.push({ type: 'node', id: selected.id });
+        showNodeDetail(node, false);
+      }
+    }
   });
 
   document.getElementById('toggle-agents').addEventListener('click', (e) => {
