@@ -30,8 +30,10 @@ import {
   detectClaudeLoginRequired,
   isClaudeMaxTurnsResult,
   isClaudeOverloadedError,
+  isClaudeThinkingSignatureError,
   isClaudeUnknownSessionError,
 } from "./parse.js";
+import { stripThinkingFromSessionTranscript } from "./sanitize-transcript.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
 import { isBedrockModelId } from "./models.js";
 
@@ -775,6 +777,53 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       await onLog(
         "stdout",
         `[paperclip] Claude resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
+      );
+      const retry = await runAttempt(null);
+      return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true });
+    }
+
+    if (
+      sessionId &&
+      !initial.proc.timedOut &&
+      (initial.proc.exitCode ?? 0) !== 0 &&
+      initial.parsed &&
+      isClaudeThinkingSignatureError(initial.parsed)
+    ) {
+      await onLog(
+        "stdout",
+        `[paperclip] Claude resume "${sessionId}" hit an invalid thinking-block signature (likely a model/provider switch); stripping thinking blocks from the session transcript and retrying.\n`,
+      );
+      let sanitized = false;
+      try {
+        sanitized = await stripThinkingFromSessionTranscript(sessionId);
+      } catch (err) {
+        await onLog(
+          "stderr",
+          `[paperclip] Failed to sanitize session transcript: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      }
+      if (sanitized) {
+        let retry = await runAttempt(sessionId);
+        if (
+          !retry.proc.timedOut &&
+          (retry.proc.exitCode ?? 0) !== 0 &&
+          retry.parsed &&
+          isClaudeThinkingSignatureError(retry.parsed)
+        ) {
+          await onLog(
+            "stdout",
+            `[paperclip] Thinking-signature error persisted after sanitizing; retrying with a fresh session.\n`,
+          );
+          retry = await runAttempt(null);
+          return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true });
+        }
+        return toAdapterResult(retry, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
+      }
+      await onLog(
+        "stdout",
+        `[paperclip] Could not sanitize session transcript; retrying with a fresh session.\n`,
       );
       const retry = await runAttempt(null);
       return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true });

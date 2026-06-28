@@ -189,6 +189,28 @@ export function isClaudeOverloadedError(parsed: Record<string, unknown> | null |
   );
 }
 
+/**
+ * Detects the HTTP 400 returned when a session is resumed under a different
+ * model provider than the one that produced its `thinking` blocks (switching
+ * Anthropic <-> Kimi <-> GLM mid-conversation). The provider-specific
+ * `signature` on a replayed thinking block fails validation, e.g.
+ * "messages.1.content.0: Invalid `signature` in `thinking` block". Safe to
+ * self-heal by stripping thinking blocks from the transcript and retrying. See
+ * FRE-1681.
+ */
+export function isClaudeThinkingSignatureError(
+  parsed: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!parsed) return false;
+  const resultText = asString(parsed.result, "").trim();
+  const allMessages = [resultText, ...extractClaudeErrorMessages(parsed)]
+    .map((msg) => msg.trim())
+    .filter(Boolean);
+  return allMessages.some((msg) =>
+    /invalid[^\n]*signature[^\n]*thinking[^\n]*block/i.test(msg),
+  );
+}
+
 export function isClaudeUnknownSessionError(parsed: Record<string, unknown>): boolean {
   const resultText = asString(parsed.result, "").trim();
   const allMessages = [resultText, ...extractClaudeErrorMessages(parsed)]

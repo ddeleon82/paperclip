@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isClaudeOverloadedError, isClaudeUnknownSessionError } from "./parse.js";
+import {
+  isClaudeOverloadedError,
+  isClaudeThinkingSignatureError,
+  isClaudeUnknownSessionError,
+} from "./parse.js";
 
 // Real failing result shape captured from FRE-1495 run history (FRE-1521):
 // a 529 surfaces as is_error:true / subtype:"success" / num_turns:1.
@@ -72,5 +76,25 @@ describe("isClaudeOverloadedError", () => {
 
   it("does not misclassify an overloaded error as an unknown-session error", () => {
     expect(isClaudeUnknownSessionError(overloaded529)).toBe(false);
+  });
+});
+
+
+describe("isClaudeThinkingSignatureError", () => {
+  it("detects the invalid thinking-block signature 400 from a provider switch", () => {
+    expect(
+      isClaudeThinkingSignatureError({
+        is_error: true,
+        result:
+          'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `signature` in `thinking` block"},"request_id":"req_011CcUVt4TMZwnuA6DCRmitd"}',
+      }),
+    ).toBe(true);
+  });
+
+  it("does not flag unrelated errors or null", () => {
+    expect(
+      isClaudeThinkingSignatureError({ is_error: true, result: "API Error: 429 rate limit" }),
+    ).toBe(false);
+    expect(isClaudeThinkingSignatureError(null)).toBe(false);
   });
 });
