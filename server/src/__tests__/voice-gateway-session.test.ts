@@ -599,11 +599,11 @@ describe("GatewaySession - behavior 5: toolCalls", () => {
     expect(subscribeSpy).toHaveBeenCalledWith("co-1", expect.any(Function));
   });
 
-  it("dispatch run terminal status → extractRunOutcome + sendSystemText + run-complete + unsubscribe", async () => {
+  it("dispatch run terminal status → extractRunOutcome + direct TTS + transcript + run-complete + unsubscribe (cascade)", async () => {
     // Use the REAL subscribeCompanyLiveEvents so we can publish events and have them routed correctly.
     // This avoids fragile mock.calls inspection.
     const extractRunOutcome = vi.fn().mockResolvedValue("Task completed successfully.");
-    const { deps, liveClient } = makeDeps({
+    const { deps, liveClient, ttsPipe } = makeDeps({
       subscribeCompanyLiveEvents,
       extractRunOutcome,
     });
@@ -646,8 +646,68 @@ describe("GatewaySession - behavior 5: toolCalls", () => {
 
     expect(extractRunOutcome).toHaveBeenCalledWith("run-tool-123");
 
-    await vi.waitFor(() => liveSessionRef._systemTexts.length > 0, { timeout: 2000 });
+    // In cascade mode, direct TTS is used instead of sendSystemText (FRE-1611)
+    expect(ttsPipe._pushed).toContain("Task completed successfully.");
+    expect(ttsPipe._endTurnCount).toBe(1);
+    expect(liveSessionRef._systemTexts).toHaveLength(0);
 
+    const msgs = socket.sentMessages();
+    const transcript = msgs.find(
+      (m) => m.type === "transcript" && (m as { final: boolean }).final === true && (m as { role: string }).role === "assistant"
+    ) as { text: string } | undefined;
+    expect(transcript?.text).toBe("Task completed successfully.");
+
+    const runComplete = msgs.find((m) => m.type === "run-complete") as {
+      type: "run-complete";
+      runId: string;
+      ok: boolean;
+    };
+    expect(runComplete?.runId).toBe("run-tool-123");
+    expect(runComplete?.ok).toBe(true);
+  });
+
+  it("dispatch run terminal status → sendSystemText + run-complete (native)", async () => {
+    const extractRunOutcome = vi.fn().mockResolvedValue("Task completed successfully.");
+    const { deps, liveClient } = makeDeps({
+      subscribeCompanyLiveEvents,
+      extractRunOutcome,
+      output: "native",
+    });
+    const session = createGatewaySession(deps);
+    const socket = makeSocket();
+
+    session.attachSocket(socket);
+    session.handleMessage({ type: "start", agentId: "agent-1" });
+    await vi.waitFor(() => liveClient.connectCallCount === 1);
+    await vi.waitFor(() => socket.sentMessages().some((m) => m.type === "ready"));
+
+    const liveSessionRef = liveClient.session!;
+
+    liveClient.emit({
+      toolCalls: [{ id: "tc-3n", name: "dispatch_to_conrad", args: { prompt: "Do the thing" } }],
+    });
+
+    await vi.waitFor(() =>
+      socket.sentMessages().some((m) => m.type === "run-dispatched"),
+      { timeout: 2000 },
+    );
+    await new Promise((r) => setTimeout(r, 20));
+
+    publishLiveEvent({
+      companyId: "co-1",
+      type: "heartbeat.run.status",
+      payload: { runId: "run-tool-123", status: "succeeded" },
+    });
+
+    await vi.waitFor(() =>
+      socket.sentMessages().some((m) => m.type === "run-complete"),
+      { timeout: 2000 },
+    );
+
+    expect(extractRunOutcome).toHaveBeenCalledWith("run-tool-123");
+
+    // Native mode still uses sendSystemText fallback
+    await vi.waitFor(() => liveSessionRef._systemTexts.length > 0, { timeout: 2000 });
     expect(liveSessionRef._systemTexts).toContain(
       "[system] Conrad finished: Task completed successfully.. Tell the user now."
     );

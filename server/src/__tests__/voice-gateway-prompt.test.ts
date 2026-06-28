@@ -61,15 +61,47 @@ describe("buildGatewaySystemPrompt", () => {
   });
 
   it("contains answer containment rule", () => {
-    expect(prompt).toContain("Never answer substantive questions");
+    expect(prompt).toContain("ANSWER CONTAINMENT - CRITICAL");
+  });
+
+  it("states the gateway does not know work items without tools", () => {
+    expect(prompt).toContain("do NOT know anything about work, tasks, issues, or projects unless a tool tells you");
+  });
+
+  it("requires tool calls for work questions", () => {
+    expect(prompt).toContain("you MUST call dispatch_to_conrad");
+  });
+
+  it("forbids answering work questions from own head", () => {
+    expect(prompt).toContain("You MUST NOT answer from your own head");
+  });
+
+  it("forbids claiming actionable work without create_task", () => {
+    expect(prompt).toContain("you MUST call create_task");
+  });
+
+  it("limits direct handling to pure chitchat", () => {
+    expect(prompt).toContain("You may ONLY handle pure chitchat directly");
+  });
+
+  it("contains the lying warning", () => {
+    expect(prompt).toContain("you are lying to the user");
   });
 
   it("routes all substantive replies through tool calls", () => {
-    expect(prompt).toContain("Everything substantive goes through a tool call");
+    expect(prompt).toContain("you MUST call dispatch_to_conrad");
   });
 
   it("contains the relay rule for completed runs", () => {
     expect(prompt).toContain("completed background run");
+  });
+
+  it("requires exact reading of run outcomes", () => {
+    expect(prompt).toContain("read the outcome EXACTLY as provided");
+  });
+
+  it("forbids summarizing or rephrasing run outcomes", () => {
+    expect(prompt).toContain("Do not summarize, rephrase, or add commentary");
   });
 
   it("contains voice style: short sentences", () => {

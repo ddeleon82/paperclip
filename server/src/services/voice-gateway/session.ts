@@ -341,7 +341,31 @@ export function createGatewaySession(deps: GatewaySessionDeps): GatewaySessionHa
         void deps.extractRunOutcome(runId).then((outcome) => {
           if (destroyed) return;
 
-          if (liveSession) {
+          if (config.output === "cascade" && ttsPipe) {
+            // FRE-1611: Speak Claude's actual output directly via TTS,
+            // bypassing Gemini generation to prevent hallucination/paraphrasing.
+            send({ type: "status", state: "speaking" });
+            ttsPipe.pushTextDelta(outcome);
+            ttsPipe.endTurn();
+
+            // Persist and send transcript since we're bypassing Gemini's turnComplete
+            send({ type: "transcript", role: "assistant", text: outcome, final: true });
+            const ts = new Date().toISOString();
+            if (dbSessionId) {
+              void voiceSessions.appendTurn(dbSessionId, { role: "assistant", text: outcome, ts }).catch((err) => {
+                console.warn("[voice-gateway] appendTurn assistant run outcome failed", err);
+              });
+              flywheel.log({
+                ts,
+                sessionId: dbSessionId,
+                userId: ctx.userId,
+                kind: "assistant_turn",
+                text: outcome,
+              });
+            }
+            send({ type: "status", state: "listening" });
+          } else if (liveSession) {
+            // Native mode fallback: let Gemini speak the outcome
             liveSession.sendSystemText(
               `[system] Conrad finished: ${outcome}. Tell the user now.`,
             );
