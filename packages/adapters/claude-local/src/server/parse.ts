@@ -167,6 +167,28 @@ export function isClaudeMaxTurnsResult(parsed: Record<string, unknown> | null | 
   return /max(?:imum)?\s+turns?/i.test(resultText);
 }
 
+/**
+ * Detects transient upstream failures (Anthropic 529 "Overloaded", 5xx, gateway
+ * errors) that surface as `is_error: true` with `subtype: "success"` and kill a
+ * wake on turn 1 even though nothing is wrong with the task itself. These are
+ * safe to retry with backoff. See FRE-1521.
+ */
+export function isClaudeOverloadedError(parsed: Record<string, unknown> | null | undefined): boolean {
+  if (!parsed) return false;
+  if (parsed.is_error !== true) return false;
+
+  const resultText = asString(parsed.result, "").trim();
+  const allMessages = [resultText, ...extractClaudeErrorMessages(parsed)]
+    .map((msg) => msg.trim())
+    .filter(Boolean);
+
+  return allMessages.some((msg) =>
+    /overloaded_error|\boverloaded\b|API Error:\s*5\d\d\b|\b5\d\d\s+(?:service unavailable|bad gateway|gateway timeout|internal server error)|internal_server_error|service[_\s]unavailable/i.test(
+      msg,
+    ),
+  );
+}
+
 export function isClaudeUnknownSessionError(parsed: Record<string, unknown>): boolean {
   const resultText = asString(parsed.result, "").trim();
   const allMessages = [resultText, ...extractClaudeErrorMessages(parsed)]

@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
+import { models } from "@paperclipai/adapter-claude-local";
 import { isClaudeMaxTurnsResult } from "@paperclipai/adapter-claude-local/server";
 import { parseClaudeStdoutLine } from "@paperclipai/adapter-claude-local/ui";
 import { printClaudeStreamEvent } from "@paperclipai/adapter-claude-local/cli";
+
+describe("claude_local selectable models", () => {
+  it("offers GLM 5.2 as a selectable model (Z.ai)", () => {
+    expect(models).toContainEqual({ id: "glm-5.2", label: "GLM 5.2 (Z.ai)" });
+  });
+
+  it("keeps the Kimi K2.6 option alongside GLM", () => {
+    expect(models.some((m) => m.id === "kimi-k2.6")).toBe(true);
+  });
+});
 
 describe("claude_local max-turn detection", () => {
   it("detects max-turn exhaustion by subtype", () => {

@@ -29,6 +29,7 @@ import {
   describeClaudeFailure,
   detectClaudeLoginRequired,
   isClaudeMaxTurnsResult,
+  isClaudeOverloadedError,
   isClaudeUnknownSessionError,
 } from "./parse.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
@@ -147,6 +148,49 @@ function applyKimiEnv(env: Record<string, string>, model: string): void {
   }
   env.ANTHROPIC_AUTH_TOKEN = kimiKey;
   env.ANTHROPIC_API_KEY = kimiKey;
+  for (const aliasKey of [
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  ]) {
+    if (!hasNonEmptyEnvValue(env, aliasKey)) env[aliasKey] = model;
+  }
+  env.CLAUDE_CODE_OAUTH_TOKEN = "";
+}
+
+const GLM_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
+
+/** Z.ai GLM model ids (e.g. "glm-5.2") run via the Anthropic-compatible endpoint (FRE-1670). */
+function isGlmModelId(model: string): boolean {
+  return model.trim().toLowerCase().startsWith("glm-");
+}
+
+/**
+ * FRE-1670: route GLM models through Z.ai's Anthropic-compatible API.
+ * Mirrors applyKimiEnv: points the Claude CLI at the Z.ai base URL with key
+ * auth, remaps the Claude alias models (small/fast + subagent opus/sonnet/haiku
+ * defaults) to the selected GLM model so sub-operations don't request
+ * nonexistent claude-* ids, and blanks the inherited subscription OAuth token
+ * so key auth wins. Throws when no key is available - a GLM run without a key
+ * must fail loudly at spawn, not 404 mid-run against the Anthropic API.
+ */
+function applyGlmEnv(env: Record<string, string>, model: string): void {
+  const glmKey =
+    (env.GLM_API_KEY ?? "").trim() ||
+    (env.ZAI_API_KEY ?? "").trim() ||
+    (process.env.GLM_API_KEY ?? "").trim() ||
+    (process.env.ZAI_API_KEY ?? "").trim();
+  if (!glmKey) {
+    throw new Error(
+      `Model "${model}" requires a Z.ai API key: set GLM_API_KEY (or ZAI_API_KEY) in the server environment or in the agent's env config (FRE-1670).`,
+    );
+  }
+  if (!hasNonEmptyEnvValue(env, "ANTHROPIC_BASE_URL")) {
+    env.ANTHROPIC_BASE_URL = GLM_ANTHROPIC_BASE_URL;
+  }
+  env.ANTHROPIC_AUTH_TOKEN = glmKey;
+  env.ANTHROPIC_API_KEY = glmKey;
   for (const aliasKey of [
     "ANTHROPIC_SMALL_FAST_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -400,9 +444,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     extraArgs,
   } = runtimeConfig;
   // FRE-1392: Kimi (Moonshot) models run against the Anthropic-compatible endpoint.
+  // FRE-1670: GLM (Z.ai) models run against their Anthropic-compatible endpoint.
   // Mutates the same env object that runChildProcess receives below.
   if (model && isKimiModelId(model)) {
     applyKimiEnv(env, model);
+  } else if (model && isGlmModelId(model)) {
+    applyGlmEnv(env, model);
   }
   const effectiveEnv = Object.fromEntries(
     Object.entries({ ...process.env, ...env }).filter(
@@ -693,7 +740,31 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   try {
-    const initial = await runAttempt(sessionId ?? null);
+    let initial = await runAttempt(sessionId ?? null);
+
+    // Retry transient upstream overload / 5xx errors with bounded exponential
+    // backoff + jitter. A single Anthropic 529 "Overloaded" otherwise marks the
+    // entire wake `failed` on turn 1 even though the task is fine (FRE-1521).
+    const maxOverloadRetries = 3;
+    for (
+      let overloadRetry = 0;
+      overloadRetry < maxOverloadRetries &&
+      !initial.proc.timedOut &&
+      isClaudeOverloadedError(initial.parsed);
+      overloadRetry += 1
+    ) {
+      const baseMs = 3000 * Math.pow(3, overloadRetry);
+      const delayMs = Math.round(baseMs * (0.8 + Math.random() * 0.4));
+      await onLog(
+        "stdout",
+        `[paperclip] Claude run hit a transient overloaded/5xx error; retry ${
+          overloadRetry + 1
+        }/${maxOverloadRetries} in ${Math.round(delayMs / 1000)}s.\n`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      initial = await runAttempt(sessionId ?? null);
+    }
+
     if (
       sessionId &&
       !initial.proc.timedOut &&
