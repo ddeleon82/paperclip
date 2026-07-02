@@ -39,7 +39,12 @@ import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
-import { buildHeartbeatRunIssueComment, summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
+import {
+  buildHeartbeatRunFailureComment,
+  buildHeartbeatRunIssueComment,
+  readAgentCheckpointNextStep,
+  summarizeHeartbeatRunResultJson,
+} from "./heartbeat-run-summary.js";
 import {
   buildWorkspaceReadyComment,
   cleanupExecutionWorkspaceArtifacts,
@@ -3899,8 +3904,70 @@ export function heartbeatService(db: Db) {
             );
           }
         }
+        // FRE-1365: timed_out/failed runs previously ended with zero external
+        // signal — no issue comment, no re-wake — leaving recovery to the
+        // 4-hour pp-quiet-watch backstop. Post a failure notice on the issue
+        // and (once per external wake) queue a recovery wake for the agent.
+        // Cancelled runs stay silent: supersession is normal flow.
+        const isRecoveryRun =
+          readNonEmptyString(context.wakeReason) === "run_failure_recovery" ||
+          readNonEmptyString(context.recoveryOfRunId) != null;
+        const shouldQueueRecoveryWake =
+          issueId != null && (outcome === "timed_out" || outcome === "failed") && !isRecoveryRun;
+        if (issueId && (outcome === "timed_out" || outcome === "failed")) {
+          try {
+            const checkpointNextStep = await readAgentCheckpointNextStep(issueRef?.identifier);
+            const durationMs =
+              finalizedRun.startedAt && finalizedRun.finishedAt
+                ? new Date(finalizedRun.finishedAt).getTime() - new Date(finalizedRun.startedAt).getTime()
+                : null;
+            const failureComment = buildHeartbeatRunFailureComment({
+              outcome,
+              durationMs,
+              errorCode: finalizedRun.errorCode,
+              errorMessage: finalizedRun.error,
+              checkpointNextStep,
+              recoveryWakeQueued: shouldQueueRecoveryWake,
+            });
+            if (failureComment) {
+              await issuesSvc.addComment(issueId, failureComment, { agentId: agent.id, runId: finalizedRun.id });
+            }
+          } catch (err) {
+            await onLog(
+              "stderr",
+              `[paperclip] Failed to post run failure comment: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+        }
         await finalizeIssueCommentPolicy(finalizedRun, agent);
         await releaseIssueExecutionAndPromote(finalizedRun);
+        if (shouldQueueRecoveryWake && issueId) {
+          try {
+            await enqueueWakeup(agent.id, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "run_failure_recovery",
+              payload: {
+                issueId,
+                recoveryOfRunId: finalizedRun.id,
+                outcome,
+              },
+              requestedByActorType: "system",
+              requestedByActorId: "run_failure_recovery",
+              contextSnapshot: {
+                issueId,
+                wakeReason: "run_failure_recovery",
+                recoveryOfRunId: finalizedRun.id,
+                source: "run.failure_recovery",
+              },
+            });
+          } catch (err) {
+            await onLog(
+              "stderr",
+              `[paperclip] Failed to queue run failure recovery wake: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+        }
       }
 
       if (finalizedRun) {
