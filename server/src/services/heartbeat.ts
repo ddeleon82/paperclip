@@ -402,6 +402,60 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+// FRE-1861: pure claim-selection policy for startNextQueuedRunForAgent.
+//
+// Root cause of the FRE-1858 dup-session incident: agents configured with
+// maxConcurrentRuns > 1 could claim multiple issue-scoped runs concurrently
+// (an assignment-source wake claimed instantly while an automation-source
+// issue run was live). All issue-scoped runs for one agent mutate the same
+// agent workspace, so two live issue runs are a two-writer race regardless of
+// which issue each run nominally targets. The per-issue execution lock in
+// enqueueWakeup never applied because the overlapping runs were on DIFFERENT
+// issues.
+//
+// Invariant: at most ONE issue-scoped run may be live per agent at any time,
+// across all wake sources (automation, assignment, on_demand). Non-issue runs
+// (timer, chat, voice) keep plain slot semantics.
+//
+// Liveness (FRE-1767): a "running" DB row that is not live in-process (server
+// restarted; orphan awaiting reap) must NOT hold the issue mutex forever —
+// callers pass an isRunLive probe, and only LIVE running issue runs block.
+export interface ClaimableRunCandidate {
+  id: string;
+  contextSnapshot: unknown;
+}
+
+function claimCandidateIssueId(run: ClaimableRunCandidate): string | null {
+  const snapshot = run.contextSnapshot;
+  if (!snapshot || typeof snapshot !== "object") return null;
+  return readNonEmptyString((snapshot as Record<string, unknown>).issueId);
+}
+
+export function selectClaimableQueuedRuns<T extends ClaimableRunCandidate>(input: {
+  queuedRuns: T[];
+  runningRuns: ClaimableRunCandidate[];
+  maxConcurrentRuns: number;
+  isRunLive: (runId: string) => boolean;
+}): T[] {
+  const availableSlots = Math.max(0, input.maxConcurrentRuns - input.runningRuns.length);
+  if (availableSlots <= 0) return [];
+
+  let issueSlotTaken = input.runningRuns.some(
+    (run) => claimCandidateIssueId(run) !== null && input.isRunLive(run.id),
+  );
+
+  const selected: T[] = [];
+  for (const run of input.queuedRuns) {
+    if (selected.length >= availableSlots) break;
+    if (claimCandidateIssueId(run) !== null) {
+      if (issueSlotTaken) continue;
+      issueSlotTaken = true;
+    }
+    selected.push(run);
+  }
+  return selected;
+}
+
 function normalizeLedgerBillingType(value: unknown): BillingType {
   const raw = readNonEmptyString(value);
   switch (raw) {
@@ -3011,29 +3065,51 @@ export function heartbeatService(db: Db) {
         return [];
       }
       const policy = parseHeartbeatPolicy(agent);
-      const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
-      if (availableSlots <= 0) return [];
+      const runningRuns = await db
+        .select({ id: heartbeatRuns.id, contextSnapshot: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "running")));
+      if (runningRuns.length >= policy.maxConcurrentRuns) return [];
 
       const queuedRuns = await db
         .select()
         .from(heartbeatRuns)
         .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
-        .orderBy(asc(heartbeatRuns.createdAt))
-        .limit(availableSlots);
+        .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
 
+      // FRE-1861: cross-source per-agent mutex — at most one issue-scoped run
+      // live per agent, liveness-probed so orphaned "running" rows do not
+      // block claims (FRE-1767).
+      const selectedRuns = selectClaimableQueuedRuns({
+        queuedRuns,
+        runningRuns,
+        maxConcurrentRuns: policy.maxConcurrentRuns,
+        isRunLive: (runId) => runningProcesses.has(runId) || activeRunExecutions.has(runId),
+      });
+      if (selectedRuns.length === 0) return [];
+
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      for (const queuedRun of queuedRuns) {
+      for (const queuedRun of selectedRuns) {
         const claimed = await claimQueuedRun(queuedRun);
         if (claimed) claimedRuns.push(claimed);
       }
       if (claimedRuns.length === 0) return [];
 
       for (const claimedRun of claimedRuns) {
-        void executeRun(claimedRun.id).catch((err) => {
-          logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
-        });
+        // FRE-1861: register liveness synchronously at dispatch so a second
+        // claim pass cannot slip through the claim→executeRun window while
+        // the async executeRun has not yet added the run to
+        // activeRunExecutions. executeRun's own add/delete of the same id is
+        // an idempotent no-op on a Set.
+        activeRunExecutions.add(claimedRun.id);
+        void executeRun(claimedRun.id)
+          .catch((err) => {
+            logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
+          })
+          .finally(() => {
+            activeRunExecutions.delete(claimedRun.id);
+          });
       }
       return claimedRuns;
     });
@@ -4381,6 +4457,18 @@ export function heartbeatService(db: Db) {
       explicitResumeSession?.sessionDisplayId ??
       await resolveSessionBeforeForWakeup(agent, effectiveTaskKey);
 
+    // FRE-1861: one human action (assigning an issue) emits both an
+    // "issue_assigned" and an "issue_execution_promoted" wake for the same
+    // (agent, issue) seconds apart. Derive a shared idempotency key for the
+    // pair so dedup across wake reasons is keyed and observable in
+    // agent_wakeup_requests (idempotency_key was previously always null).
+    // An explicitly supplied opts.idempotencyKey always wins.
+    const derivedIdempotencyKey =
+      opts.idempotencyKey ??
+      (issueId && reason && (reason === "issue_assigned" || reason === "issue_execution_promoted")
+        ? `issue-exec:${agentId}:${issueId}`
+        : null);
+
     const writeSkippedRequest = async (skipReason: string) => {
       await db.insert(agentWakeupRequests).values({
         companyId: agent.companyId,
@@ -4392,7 +4480,7 @@ export function heartbeatService(db: Db) {
         status: "skipped",
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
+        idempotencyKey: derivedIdempotencyKey,
         finishedAt: new Date(),
       });
     };
@@ -4471,7 +4559,7 @@ export function heartbeatService(db: Db) {
             status: "skipped",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
+            idempotencyKey: derivedIdempotencyKey,
             finishedAt: new Date(),
           });
           return { kind: "skipped" as const };
@@ -4580,10 +4668,23 @@ export function heartbeatService(db: Db) {
               coalescedCount: 1,
               requestedByActorType: opts.requestedByActorType ?? null,
               requestedByActorId: opts.requestedByActorId ?? null,
-              idempotencyKey: opts.idempotencyKey ?? null,
+              idempotencyKey: derivedIdempotencyKey,
               runId: mergedRun.id,
               finishedAt: new Date(),
             });
+
+            // FRE-1861: make dedup visible on the SURVIVING wake row too —
+            // previously coalesced_count stayed 0 on the survivor, so evidence
+            // queries could not see that later wakes were folded into it.
+            if (mergedRun.wakeupRequestId) {
+              await tx
+                .update(agentWakeupRequests)
+                .set({
+                  coalescedCount: sql`${agentWakeupRequests.coalescedCount} + 1`,
+                  updatedAt: new Date(),
+                })
+                .where(eq(agentWakeupRequests.id, mergedRun.wakeupRequestId));
+            }
 
             return { kind: "coalesced" as const, run: mergedRun };
           }
@@ -4645,7 +4746,7 @@ export function heartbeatService(db: Db) {
             status: "deferred_issue_execution",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
+            idempotencyKey: derivedIdempotencyKey,
           });
 
           return { kind: "deferred" as const };
@@ -4663,7 +4764,7 @@ export function heartbeatService(db: Db) {
             status: "queued",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
+            idempotencyKey: derivedIdempotencyKey,
           })
           .returning()
           .then((rows) => rows[0]);
@@ -4763,7 +4864,7 @@ export function heartbeatService(db: Db) {
         coalescedCount: 1,
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
+        idempotencyKey: derivedIdempotencyKey,
         runId: mergedRun.id,
         finishedAt: new Date(),
       });
@@ -4782,7 +4883,7 @@ export function heartbeatService(db: Db) {
         status: "queued",
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
+        idempotencyKey: derivedIdempotencyKey,
       })
       .returning()
       .then((rows) => rows[0]);
