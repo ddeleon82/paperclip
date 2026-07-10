@@ -1299,7 +1299,12 @@ export function issueRoutes(
       },
     });
 
-    void queueIssueAssignmentWakeup({
+    // FRE-1864: this wake is fire-and-forget (the issue is already created and
+    // the 201 is about to be sent), so its rejection MUST be handled here.
+    // `void promise` does not handle rejections — an enqueueWakeup 409 for a
+    // paused assignee previously escaped as an unhandled rejection and killed
+    // the whole server (pm2 restart #34, 2026-07-05).
+    queueIssueAssignmentWakeup({
       heartbeat,
       issue,
       reason: "issue_assigned",
@@ -1307,6 +1312,11 @@ export function issueRoutes(
       contextSource: "issue.create",
       requestedByActorType: actor.actorType,
       requestedByActorId: actor.actorId,
+    })?.catch((err) => {
+      logger.error(
+        { err, issueId: issue.id, assigneeAgentId: issue.assigneeAgentId },
+        "assignment wake failed after issue create; issue was created, wake dropped",
+      );
     });
 
     res.status(201).json(issue);
@@ -1880,7 +1890,9 @@ export function issueRoutes(
           .wakeup(agentId, wakeup)
           .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on issue update"));
       }
-    })();
+      // FRE-1864: catch on the IIFE itself — any uncaught await inside this
+      // fire-and-forget block would otherwise crash the process.
+    })().catch((err) => logger.error({ err, issueId: issue.id }, "post-update wake fan-out failed"));
 
     res.json({ ...issueResponse, comment });
   });
@@ -2372,7 +2384,9 @@ export function issueRoutes(
           .wakeup(agentId, wakeup)
           .catch((err) => logger.warn({ err, issueId: currentIssue.id, agentId }, "failed to wake agent on issue comment"));
       }
-    })();
+      // FRE-1864: catch on the IIFE itself — any uncaught await inside this
+      // fire-and-forget block would otherwise crash the process.
+    })().catch((err) => logger.error({ err, issueId: currentIssue.id }, "post-comment wake fan-out failed"));
 
     res.status(201).json(comment);
   });

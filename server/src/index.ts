@@ -55,6 +55,20 @@ import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { runningProcesses } from "./adapters/index.js";
 
+// FRE-1864: last line of defense. Node's default policy for unhandled promise
+// rejections is process death; a single fire-and-forget wake rejecting (e.g.
+// 409 "agent not invokable" after issue create) took down the entire API
+// server on 2026-07-05 (pm2 restart #34). Call sites are fixed to handle their
+// own rejections; this guard ensures an escaped rejection is logged loudly
+// (never silently) instead of killing every agent's API. uncaughtException is
+// deliberately NOT guarded — synchronous throws may leave corrupt state.
+process.on("unhandledRejection", (reason) => {
+  logger.error(
+    { err: reason },
+    "unhandledRejection reached process level (FRE-1864 guard) — fix the offending call site",
+  );
+});
+
 type BetterAuthSessionUser = {
   id: string;
   email?: string | null;
