@@ -423,12 +423,74 @@ function readNonEmptyString(value: unknown): string | null {
 export interface ClaimableRunCandidate {
   id: string;
   contextSnapshot: unknown;
+  // FRE-2086: linked-issue priority rank (0 = critical … 3 = low; higher = less
+  // urgent). Non-issue runs, and issue runs whose issue could not be resolved,
+  // are null and keep plain FIFO order. Used only to decide WHICH competing
+  // issue-scoped queued run wins the per-agent issue mutex, so a critical wake
+  // is claimed ahead of a stale lower-priority backlog wake.
+  issuePriorityRank?: number | null;
+}
+
+// FRE-2086: map an issue priority string to a claim-order rank. Lower = more
+// urgent. Unknown/unset priorities sort last (least urgent) so a run whose
+// issue we could not resolve never jumps ahead of a known-priority run.
+const ISSUE_PRIORITY_CLAIM_RANK: Record<string, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+
+export function issuePriorityClaimRank(priority: string | null | undefined): number {
+  if (priority && Object.prototype.hasOwnProperty.call(ISSUE_PRIORITY_CLAIM_RANK, priority)) {
+    return ISSUE_PRIORITY_CLAIM_RANK[priority];
+  }
+  return ISSUE_PRIORITY_CLAIM_RANK.low + 1; // unknown → least urgent
 }
 
 function claimCandidateIssueId(run: ClaimableRunCandidate): string | null {
   const snapshot = run.contextSnapshot;
   if (!snapshot || typeof snapshot !== "object") return null;
   return readNonEmptyString((snapshot as Record<string, unknown>).issueId);
+}
+
+function claimCandidatePriorityRank(run: ClaimableRunCandidate): number {
+  return typeof run.issuePriorityRank === "number"
+    ? run.issuePriorityRank
+    : issuePriorityClaimRank(null);
+}
+
+// FRE-2086: reorder ONLY the issue-scoped queued runs by linked-issue priority
+// (critical first), breaking ties by their existing input order (createdAt ASC =
+// oldest requested first). Non-issue runs and the positions issue runs occupy
+// are left untouched, so plain FIFO slot semantics are unchanged — only the
+// relative order of issue runs (which decides the single issue-mutex winner)
+// changes. Array.prototype.sort is stable, so equal ranks preserve input order.
+function reorderIssueRunsByPriority<T extends ClaimableRunCandidate>(runs: T[]): T[] {
+  const issuePositions: number[] = [];
+  const issueRuns: T[] = [];
+  runs.forEach((run, index) => {
+    if (claimCandidateIssueId(run) !== null) {
+      issuePositions.push(index);
+      issueRuns.push(run);
+    }
+  });
+  if (issueRuns.length <= 1) return runs;
+
+  const sortedIssueRuns = issueRuns
+    .map((run, index) => ({ run, index }))
+    .sort(
+      (a, b) =>
+        claimCandidatePriorityRank(a.run) - claimCandidatePriorityRank(b.run) ||
+        a.index - b.index,
+    )
+    .map((entry) => entry.run);
+
+  const result = [...runs];
+  issuePositions.forEach((position, k) => {
+    result[position] = sortedIssueRuns[k];
+  });
+  return result;
 }
 
 export function selectClaimableQueuedRuns<T extends ClaimableRunCandidate>(input: {
@@ -444,8 +506,12 @@ export function selectClaimableQueuedRuns<T extends ClaimableRunCandidate>(input
     (run) => claimCandidateIssueId(run) !== null && input.isRunLive(run.id),
   );
 
+  // FRE-2086: prefer the highest-priority queued issue run for the single issue
+  // slot, instead of the plain-oldest run.
+  const orderedRuns = reorderIssueRunsByPriority(input.queuedRuns);
+
   const selected: T[] = [];
-  for (const run of input.queuedRuns) {
+  for (const run of orderedRuns) {
     if (selected.length >= availableSlots) break;
     if (claimCandidateIssueId(run) !== null) {
       if (issueSlotTaken) continue;
@@ -2844,6 +2910,13 @@ export function heartbeatService(db: Db) {
   async function resurrectDeferredWakesForAgent(agentId: string): Promise<void> {
     const TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
     const ACTIVE_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"] as const;
+    // FRE-2086: agent_resumed burst window. A single resume fans out one
+    // agent_resumed wake per open issue; repeated resume events (pause/resume
+    // flapping, a double-tapped resume endpoint) would multiply that fan-out
+    // into dozens of full serial run slots. Within this window we treat a prior
+    // agent_resumed wake for the same agent+issue — in ANY status — as already
+    // covering the resume, so a second resume does not re-fan-out.
+    const AGENT_RESUME_BURST_WINDOW_MS = 15 * 60 * 1000;
 
     const agent = await db
       .select()
@@ -2985,6 +3058,31 @@ export function heartbeatService(db: Db) {
           .then((rows) => rows[0] ?? null);
         if (existingRun) return;
 
+        // FRE-2086: burst dedup — skip if an agent_resumed wake for this
+        // agent+issue was already requested within the burst window, regardless
+        // of its current status (claimed/running/succeeded/failed/coalesced).
+        // The queued/deferred and queued/running checks above miss wakes that
+        // already left those states, so a re-resume inside the window would
+        // otherwise multiply the fan-out.
+        const recentResumeWake = await db
+          .select({ id: agentWakeupRequests.id })
+          .from(agentWakeupRequests)
+          .where(
+            and(
+              eq(agentWakeupRequests.companyId, agent.companyId),
+              eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.reason, "agent_resumed"),
+              sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+              gt(
+                agentWakeupRequests.requestedAt,
+                new Date(Date.now() - AGENT_RESUME_BURST_WINDOW_MS),
+              ),
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (recentResumeWake) return;
+
         await enqueueWakeup(agentId, {
           source: "automation",
           triggerDetail: "system",
@@ -3071,18 +3169,81 @@ export function heartbeatService(db: Db) {
         .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "running")));
       if (runningRuns.length >= policy.maxConcurrentRuns) return [];
 
-      const queuedRuns = await db
+      const queuedRunsRaw = await db
         .select()
         .from(heartbeatRuns)
         .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
         .orderBy(asc(heartbeatRuns.createdAt));
+      if (queuedRunsRaw.length === 0) return [];
+
+      // FRE-2086: resolve each queued run's linked-issue priority + status so the
+      // claim policy can (a) prefer higher-priority issue wakes over stale
+      // lower-priority backlog, and (b) skip wakes whose issue already reached a
+      // terminal state instead of burning a full serial run slot on dead work.
+      // Repro (FRE-2073): a critical wake queued behind a CANCELLED issue's wake
+      // and an ended-engagement issue's wake, both claimed ahead of it FIFO.
+      const queuedIssueIds = [
+        ...new Set(
+          queuedRunsRaw
+            .map((run) => readNonEmptyString(parseObject(run.contextSnapshot).issueId))
+            .filter((id): id is string => id !== null),
+        ),
+      ];
+      const issueMetaById = new Map<string, { priority: string; status: string }>();
+      if (queuedIssueIds.length > 0) {
+        const issueRows = await db
+          .select({ id: issues.id, priority: issues.priority, status: issues.status })
+          .from(issues)
+          .where(and(eq(issues.companyId, agent.companyId), inArray(issues.id, queuedIssueIds)));
+        for (const row of issueRows) {
+          issueMetaById.set(row.id, { priority: row.priority, status: row.status });
+        }
+      }
+
+      const TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
+      const queuedRuns: typeof queuedRunsRaw = [];
+      for (const run of queuedRunsRaw) {
+        const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+        const meta = issueId ? issueMetaById.get(issueId) ?? null : null;
+        if (meta && (TERMINAL_ISSUE_STATUSES as readonly string[]).includes(meta.status)) {
+          // FRE-2086: expire the wake for a done/cancelled issue rather than
+          // execute a full run for it. Finalize both the run and its wake so the
+          // dead wake stops occupying the queue and does not block the mutex.
+          const skipReason = `Wake skipped: linked issue ${issueId} is ${meta.status}`;
+          await setRunStatus(run.id, "cancelled", {
+            finishedAt: new Date(),
+            error: skipReason,
+            errorCode: "issue_terminal_at_claim",
+          });
+          await setWakeupStatus(run.wakeupRequestId, "failed", {
+            finishedAt: new Date(),
+            error: skipReason,
+          });
+          logger.info(
+            { agentId, runId: run.id, issueId, issueStatus: meta.status },
+            "startNextQueuedRunForAgent: skipped wake for terminal issue (FRE-2086)",
+          );
+          continue;
+        }
+        queuedRuns.push(run);
+      }
       if (queuedRuns.length === 0) return [];
+
+      const claimCandidates = queuedRuns.map((run) => {
+        const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+        const meta = issueId ? issueMetaById.get(issueId) ?? null : null;
+        return {
+          ...run,
+          issuePriorityRank: meta ? issuePriorityClaimRank(meta.priority) : null,
+        };
+      });
 
       // FRE-1861: cross-source per-agent mutex — at most one issue-scoped run
       // live per agent, liveness-probed so orphaned "running" rows do not
-      // block claims (FRE-1767).
+      // block claims (FRE-1767). FRE-2086: candidates carry issuePriorityRank so
+      // the issue-mutex winner is the highest-priority queued issue run.
       const selectedRuns = selectClaimableQueuedRuns({
-        queuedRuns,
+        queuedRuns: claimCandidates,
         runningRuns,
         maxConcurrentRuns: policy.maxConcurrentRuns,
         isRunLive: (runId) => runningProcesses.has(runId) || activeRunExecutions.has(runId),
