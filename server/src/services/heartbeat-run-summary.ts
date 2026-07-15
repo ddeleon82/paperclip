@@ -164,3 +164,44 @@ export async function readAgentCheckpointNextStep(
     return null;
   }
 }
+
+export interface AgentCheckpointState {
+  nextStep: string | null;
+  status: string | null;
+  phase: string | null;
+}
+
+/**
+ * Best-effort read of the FRE-1268 checkpoint status/phase/next_step for an
+ * issue. Used to decide whether a cleanly-exited ("succeeded") run left work
+ * unfinished (status="in_progress") and should be auto-continued. Any failure
+ * resolves to null so run finalization never throws.
+ */
+export async function readAgentCheckpointState(
+  issueIdentifier: string | null | undefined,
+  rootDir?: string,
+): Promise<AgentCheckpointState | null> {
+  const identifier = readCommentText(issueIdentifier);
+  if (!identifier || !CHECKPOINT_IDENTIFIER_PATTERN.test(identifier)) {
+    return null;
+  }
+
+  try {
+    const raw = await readFile(
+      join(rootDir ?? defaultCheckpointRoot(), identifier, "checkpoint.json"),
+      "utf8",
+    );
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const obj = parsed as Record<string, unknown>;
+    return {
+      nextStep: readCommentText(obj.next_step),
+      status: readCommentText(obj.status),
+      phase: readCommentText(obj.phase),
+    };
+  } catch {
+    return null;
+  }
+}

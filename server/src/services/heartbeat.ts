@@ -43,6 +43,7 @@ import {
   buildHeartbeatRunFailureComment,
   buildHeartbeatRunIssueComment,
   readAgentCheckpointNextStep,
+  readAgentCheckpointState,
   summarizeHeartbeatRunResultJson,
 } from "./heartbeat-run-summary.js";
 import {
@@ -79,6 +80,9 @@ import {
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
+// Hard ceiling on consecutive auto-continuations of one checkpointed task,
+// so a stuck agent that keeps re-checkpointing cannot loop forever.
+const CHECKPOINT_CONTINUATION_MAX = 25;
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const WAKE_COMMENT_IDS_KEY = "wakeCommentIds";
 const PAPERCLIP_WAKE_PAYLOAD_KEY = "paperclipWake";
@@ -4202,6 +4206,67 @@ export function heartbeatService(db: Db) {
             await onLog(
               "stderr",
               `[paperclip] Failed to queue run failure recovery wake: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+        }
+
+        // Auto-continue a task that voluntarily checkpointed mid-run. A clean
+        // checkpoint-and-exit lands as "succeeded", but the agent's
+        // checkpoint.json can still read status="in_progress" with a next_step
+        // — more work to do. Without this the task idles until an external
+        // comment or a manual re-task, because succeeded runs otherwise enqueue
+        // nothing and the heartbeat timer is disabled. Mirrors the
+        // run_failure_recovery wake for the success+incomplete case. Guarded by
+        // a hard cap (CHECKPOINT_CONTINUATION_MAX) and a stall detector (same
+        // next_step twice => agent not advancing). Blocked checkpoints are left
+        // alone (genuinely waiting on something external).
+        if (outcome === "succeeded" && issueId) {
+          try {
+            const checkpoint = await readAgentCheckpointState(issueRef?.identifier);
+            const nextStep = readNonEmptyString(checkpoint?.nextStep ?? null);
+            const wantsContinue =
+              checkpoint?.status === "in_progress" && checkpoint.phase !== "blocked";
+            if (wantsContinue && nextStep) {
+              const priorCount = Math.max(0, asNumber(context.checkpointContinuationCount, 0));
+              const priorNextStep = readNonEmptyString(context.checkpointLastNextStep);
+              const nextCount = priorCount + 1;
+              if (priorNextStep != null && priorNextStep === nextStep) {
+                await onLog(
+                  "stdout",
+                  `[paperclip] Checkpoint continuation halted: next_step unchanged ("${nextStep}") — agent not advancing.\n`,
+                );
+              } else if (nextCount > CHECKPOINT_CONTINUATION_MAX) {
+                await onLog(
+                  "stdout",
+                  `[paperclip] Checkpoint continuation halted: hit cap of ${CHECKPOINT_CONTINUATION_MAX} auto-continuations for this task.\n`,
+                );
+              } else {
+                await enqueueWakeup(agent.id, {
+                  source: "automation",
+                  triggerDetail: "system",
+                  reason: "checkpoint_continuation",
+                  payload: {
+                    issueId,
+                    continuationOfRunId: finalizedRun.id,
+                    checkpointContinuationCount: nextCount,
+                  },
+                  requestedByActorType: "system",
+                  requestedByActorId: "checkpoint_continuation",
+                  contextSnapshot: {
+                    issueId,
+                    wakeReason: "checkpoint_continuation",
+                    continuationOfRunId: finalizedRun.id,
+                    checkpointContinuationCount: nextCount,
+                    checkpointLastNextStep: nextStep,
+                    source: "run.checkpoint_continuation",
+                  },
+                });
+              }
+            }
+          } catch (err) {
+            await onLog(
+              "stderr",
+              `[paperclip] Failed to queue checkpoint continuation wake: ${err instanceof Error ? err.message : String(err)}\n`,
             );
           }
         }
