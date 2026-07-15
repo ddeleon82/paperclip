@@ -4153,8 +4153,20 @@ export function heartbeatService(db: Db) {
         const isRecoveryRun =
           readNonEmptyString(context.wakeReason) === "run_failure_recovery" ||
           readNonEmptyString(context.recoveryOfRunId) != null;
+        // A usage-limit / rate-limit failure cannot succeed by retrying — the
+        // FRE-1365 recovery wake would just create a tight failure loop that
+        // hammers the (already capped) Claude subscription. Detect it and skip
+        // the recovery wake; the task resumes on its next normal/scheduled wake
+        // after the limit resets. Kept narrow so genuine transient failures
+        // (overloaded, network) still get their recovery retry.
+        const isUsageLimitFailure = /you'?ve hit your limit|hit your (usage )?limit|usage limit|rate[ _]?limit|\b429\b|resets \d{1,2}:\d{2}\s?(am|pm)|weekly limit/i.test(
+          readNonEmptyString(finalizedRun.error) ?? readNonEmptyString(adapterResult.errorMessage) ?? "",
+        );
         const shouldQueueRecoveryWake =
-          issueId != null && (outcome === "timed_out" || outcome === "failed") && !isRecoveryRun;
+          issueId != null &&
+          (outcome === "timed_out" || outcome === "failed") &&
+          !isRecoveryRun &&
+          !isUsageLimitFailure;
         if (issueId && (outcome === "timed_out" || outcome === "failed")) {
           try {
             const checkpointNextStep = await readAgentCheckpointNextStep(issueRef?.identifier);
