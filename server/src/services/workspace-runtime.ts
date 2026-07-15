@@ -878,7 +878,28 @@ export async function realizeExecutionWorkspace(input: {
     };
   }
 
-  const repoRoot = await runGit(["rev-parse", "--show-toplevel"], input.base.baseCwd);
+  // FRE-2151: git_worktree needs a git repo at the base cwd, which is supplied
+  // by the issue's project workspace. A task assigned to a git_worktree agent
+  // with no git-backed project resolves base cwd to the (non-git) agent home, and
+  // a hard `git rev-parse` failure would kill the whole run ("not a git
+  // repository"). Degrade gracefully to a plain project_primary workspace so the
+  // agent still runs when no source repo is available.
+  const repoRoot = await runGit(["rev-parse", "--show-toplevel"], input.base.baseCwd).catch(
+    () => null,
+  );
+  if (!repoRoot) {
+    return {
+      ...input.base,
+      strategy: "project_primary",
+      cwd: input.base.baseCwd,
+      branchName: null,
+      worktreePath: null,
+      warnings: [
+        `git_worktree requested but base cwd "${input.base.baseCwd}" is not a git repository (no git-backed project); falling back to a plain workspace`,
+      ],
+      created: false,
+    };
+  }
   const branchTemplate = asString(rawStrategy.branchTemplate, "{{issue.identifier}}-{{slug}}");
   const renderedBranch = renderWorkspaceTemplate(branchTemplate, {
     issue: input.issue,
