@@ -4224,8 +4224,19 @@ export function heartbeatService(db: Db) {
           try {
             const checkpoint = await readAgentCheckpointState(issueRef?.identifier);
             const nextStep = readNonEmptyString(checkpoint?.nextStep ?? null);
+            // Agents self-label `phase` inconsistently: phase="blocked" covers
+            // both context-parks that SHOULD auto-continue (status still
+            // "in_progress", next_step is actionable work) and genuine
+            // human-blocks that must not. So key on status="in_progress" and
+            // instead skip only when the next_step itself signals waiting
+            // (starts with await/awaiting/blocked). This resumes context-parked
+            // mid-work while still holding off "AWAIT Dom decision"-style parks.
+            // status="blocked" tasks are excluded by the status check.
+            const waitingMarker = /^\s*(await|awaiting|blocked)\b/i;
             const wantsContinue =
-              checkpoint?.status === "in_progress" && checkpoint.phase !== "blocked";
+              checkpoint?.status === "in_progress" &&
+              !!nextStep &&
+              !waitingMarker.test(nextStep);
             if (wantsContinue && nextStep) {
               const priorCount = Math.max(0, asNumber(context.checkpointContinuationCount, 0));
               const priorNextStep = readNonEmptyString(context.checkpointLastNextStep);
